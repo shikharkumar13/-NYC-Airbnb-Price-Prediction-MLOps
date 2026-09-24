@@ -21,8 +21,8 @@
 | **9** | Docker | Slim API image that loads the champion at startup | ✅ Done |
 | **10** | Prefect | Automated, scheduled retraining flow | ✅ Done |
 | **11** | GitHub Actions | CI — tests on every pull request | ✅ Done |
-| **12** | GitHub Actions, Docker Hub | CD — push the image when a new model is promoted | ⏳ Next |
-| **13** | Docker Compose | MLflow + API running together (optional) | ⬜ |
+| **12** | GitHub Actions, Docker Hub | CD — push the image when a new model is promoted | ✅ Done |
+| **13** | Docker Compose | MLflow + API running together (optional) | ⏳ Next |
 | **14** | — | Definition-of-done check + README | ⬜ |
 
 > **How to use this guide:** Each task's section is written once that task is built, using the real commands and outputs from this project, so the guide always matches the code. The step-by-step build plan (with every code file) lives in `docs/superpowers/plans/2026-09-24-nyc-airbnb-price-prediction.md`.
@@ -2771,6 +2771,17 @@ Result, watched live through GitHub's API:
 
 Every step of `test` succeeded: MLflow server started → `@champion` seeded → `pytest -v` passed. The PR page shows both checks green.
 
+Pushing another commit to the PR re-ran CI, and the caches kicked in:
+
+| Job | 1st run | 2nd run (cached) |
+|---|---|---|
+| test | 2 m 31 s (pip install 55 s) | 2 m 05 s (pip install 43 s) |
+| build-image | 1 m 16 s | **31 s** — Docker layers reused from GitHub's cache |
+
+The Docker build halved because the 506 MB dependency layer (Task 9) was unchanged and reused.
+
+After merging, GitHub's **"Delete branch"** button removes the PR branch on GitHub; locally, `git fetch --prune` then `git branch -d <branch>` tidies up.
+
 > 💡 **See the logs yourself:** on the PR, click **Details** next to a check → the **test** job → the **Run pytest -v** step. You'll find `tests/test_model_registry.py ... PASSED`, which proves the registry tests really ran in CI (they only skip when `MLFLOW_TRACKING_URI` is unset, and CI sets it). GitHub only shows job logs to signed-in users.
 
 ---
@@ -2796,6 +2807,273 @@ NYC-Airbnb-Price-Prediction/
 
 # TASK 12 — Continuous Deployment: Publish the Image to Docker Hub
 
-*Written when Task 12 is built.*
+---
 
-**Preview:** a `deploy.yml` workflow that builds the API image and **pushes** it to Docker Hub. It runs only when triggered, either by hand or by the Prefect flow after it promotes a new champion. It needs a Docker Hub account and access token (stored as GitHub secrets), plus a GitHub token that lets the flow trigger workflows.
+### What Problem This Solves
+
+CI (Task 11) *checks* every change. **Continuous Deployment (CD)** *ships* it: builds the API image and publishes it to a **registry** (here Docker Hub) that any server can pull from. And in MLOps, a release isn't only triggered by new code — it's triggered by **a new model**. So the loop we want is:
+
+```mermaid
+flowchart LR
+    P["🔁 Prefect flow\nretrain + promote vN\nto @champion"] -- "trigger_deploy.py\nGitHub API: workflow_dispatch\n(model_version = N)" --> D
+    subgraph gha ["GitHub Actions: deploy.yml"]
+        D["build image\namd64 + arm64"] --> PUSH["push to Docker Hub"]
+    end
+    PUSH --> HUB[("🐳 Docker Hub\nkrshikhar13/airbnb-price-api\n:latest · :model-vN · :sha")]
+    HUB -- "docker pull / run" --> SRV["Any server or laptop"]
+    SRV -- "loads @champion at startup" --> MLF["MLflow registry"]
+```
+
+The image itself stays model-free (Task 9). The `model-vN` tag records *which promotion caused this release*.
+
+---
+
+### Step 1 — `.github/workflows/deploy.yml`
+
+```yaml
+name: Deploy
+
+on:
+  workflow_dispatch:
+    inputs:
+      model_version:
+        description: "AirbnbPriceModel version just promoted to @champion"
+        required: true
+        type: string
+
+jobs:
+  build-and-push:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      # QEMU lets this amd64 runner also build the arm64 (Apple Silicon) image.
+      - uses: docker/setup-qemu-action@v4
+      - uses: docker/setup-buildx-action@v4
+      - uses: docker/login-action@v4
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+      - uses: docker/build-push-action@v7
+        with:
+          context: .
+          # One tag, two builds: Docker picks the right one for each machine.
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: |
+            ${{ secrets.DOCKERHUB_USERNAME }}/airbnb-price-api:latest
+            ${{ secrets.DOCKERHUB_USERNAME }}/airbnb-price-api:model-v${{ inputs.model_version }}
+            ${{ secrets.DOCKERHUB_USERNAME }}/airbnb-price-api:${{ github.sha }}
+          labels: |
+            org.opencontainers.image.revision=${{ github.sha }}
+            airbnb.model-version=${{ inputs.model_version }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+```
+
+**Reading it:**
+
+| Part | Meaning |
+|---|---|
+| `on: workflow_dispatch` | **Only runs when asked** — from the Actions tab or via GitHub's API. Never on every push |
+| `inputs.model_version` | A value passed in when triggered; used in a tag and a label |
+| `secrets.DOCKERHUB_...` | Encrypted values stored in the repo settings; GitHub hides them in logs |
+| `login-action` | Logs in to Docker Hub with the token (never a password) |
+| `push: true` | Unlike CI, this job **publishes** |
+| Three tags | `latest` = newest release · `model-vN` = which champion triggered it · `<sha>` = exact code |
+| `labels` | Metadata baked into the image itself (`docker image inspect` shows them) |
+
+> 💡 **A `workflow_dispatch` workflow must be on the default branch** before it can be triggered. That's why `deploy.yml` went through a PR (#2) and was merged first.
+
+---
+
+### Step 2 — Secrets: Docker Hub Token
+
+Done by you in the browser — tokens never pass through code or chat:
+
+1. **hub.docker.com → Account settings → Personal access tokens → Generate new token** — Read & Write. Copy it once.
+2. **GitHub repo → Settings → Secrets and variables → Actions → New repository secret:**
+   - `DOCKERHUB_USERNAME` = `krshikhar13`
+   - `DOCKERHUB_TOKEN` = the token
+
+---
+
+### Step 3 — First Deploy, by Hand
+
+**Actions → Deploy → Run workflow**, branch `main`, `model_version` = **`3`** (the champion at the time).
+
+Result on Docker Hub:
+```
+latest                                    pushed 16:16:11 UTC
+model-v3                                  pushed 16:16:13 UTC
+9f00579b44ef1469ad8de6e3afff3d28a4f2ccb3  pushed 16:16:15 UTC   ← = main's commit
+```
+Size: 180 MB compressed download (≈850 MB unpacked).
+
+> ⚠️ **API rate limits.** While watching runs we polled GitHub's API without logging in every 20–30 s and hit the limit — **60 requests/hour** for anonymous calls (`remaining 0/60`). Poll gently (once a minute), stop watchers you no longer need, or authenticate.
+
+---
+
+### Step 4 — The Platform Surprise: `no matching manifest for linux/arm64`
+
+Pulling the published image on the Mac failed:
+```
+docker pull krshikhar13/airbnb-price-api:model-v3
+no matching manifest for linux/arm64/v8 in the manifest list entries
+```
+
+**Why:** GitHub's runners are Intel/AMD (`amd64`), so the image was built only for `amd64`. This Mac is Apple Silicon (`arm64`). It *could* run with `--platform linux/amd64` (Docker Desktop emulates an Intel CPU — slower), but a plain `docker pull` fails for any Apple Silicon user.
+
+**Fix (PR #3):** build a **multi-architecture** image — `setup-qemu-action` (an emulator that lets the amd64 runner build arm64 too) plus `platforms: linux/amd64,linux/arm64`. One tag now points at two builds, and Docker picks the right one automatically. Cost: the deploy went from ~1 minute to **~5 minutes**, because the arm64 half is built under emulation.
+
+---
+
+### Step 5 — Let the Flow Trigger Deploys: GitHub Token
+
+`scripts/trigger_deploy.py` (Task 10) calls GitHub's API, which needs a token:
+
+**GitHub → Settings → Developer settings → Personal access tokens → Fine-grained tokens → Generate new token**
+- Repository access: **Only select repositories** → this repo
+- Repository permissions → **Actions: Read and write**
+
+Used only from your own terminal:
+```bash
+export MLFLOW_TRACKING_URI=http://127.0.0.1:5001
+export GITHUB_REPO=shikharkumar13/-NYC-Airbnb-Price-Prediction-MLOps
+export GITHUB_TOKEN=<your fine-grained token>
+python orchestrate_training.py
+```
+
+---
+
+### Step 6 — A Silent Failure, Found and Fixed
+
+The first full run looked perfect:
+```
+promoted run 3f9000a1... as AirbnbPriceModel v4 @champion
+Flow run 'gabby-coot' - Finished in state Completed()
+```
+…but **no deploy appeared on GitHub.** Investigation:
+
+1. The Prefect log had **no** "skipping deploy trigger" warning → the env vars were set, so GitHub *was* called.
+2. GitHub showed no new run → GitHub **refused** the request.
+3. Yet `request_deploy` said **COMPLETED** — because `trigger_deploy` only *printed* the error to the terminal and *returned `False`*. Prefect never knew.
+
+**The actual cause** (from the terminal): 
+```
+403 Resource not accessible by personal access token
+```
+The fine-grained token didn't have **Actions: Read and write**. Fine-grained tokens start with *no* permissions; each must be granted explicitly. Fixed by editing the token's permissions.
+
+| Error | Usual cause |
+|---|---|
+| `401 Bad credentials` | Token not exported in *that* terminal, expired, or copied incompletely |
+| `403 Resource not accessible by personal access token` | Token lacks **Actions: Read and write** ← *our case* |
+| `404 Not Found` | Token not granted this repo, or a typo in `GITHUB_REPO` (ours starts with `-`!) |
+
+**The code fix (PR #4), test-first:** a failed trigger must *fail*, loudly:
+
+```python
+class DeployTriggerError(RuntimeError):
+    """GitHub refused to start the deploy workflow."""
+
+...
+    if response.status_code not in (200, 204):
+        raise DeployTriggerError(
+            f"GitHub refused to start {WORKFLOW_FILE} for {repo}: "
+            f"{response.status_code} {response.text}"
+        )
+    return True
+```
+
+New tests:
+
+| Test | What it proves |
+|---|---|
+| `test_trigger_deploy_raises_with_githubs_reason` | A 403 raises, and the message includes GitHub's reason |
+| `test_request_deploy_task_fails_when_github_rejects` | The real Prefect `request_deploy` task (called via `.fn`) raises — so the flow ends **Failed**, with the reason in Prefect's log |
+
+> 💡 **Lesson:** "returns `False` and prints something" is how errors get lost in automated systems — nobody reads the terminal of a scheduled job at 03:00. In a pipeline, failures should *raise*, so the orchestrator records them.
+
+---
+
+### Step 7 — Verify the Published Multi-Arch Image
+
+After the permission fix, `python -m scripts.trigger_deploy --model-version 4` started a deploy (4 m 53 s, both architectures):
+
+```
+latest     archs ['amd64', 'arm64']
+model-v4   archs ['amd64', 'arm64']
+f664d6b…   archs ['amd64', 'arm64']
+```
+
+The real test — what a user would do — with **no `--platform` flag**:
+```bash
+docker pull krshikhar13/airbnb-price-api:latest        # works now; Docker picked arm64
+docker run -d --name airbnb-hub -p 8001:8000 \
+  -e MLFLOW_TRACKING_URI=http://host.docker.internal:5001 \
+  krshikhar13/airbnb-price-api:latest
+```
+```
+local arch=arm64 | model-version label=4 | revision=f664d6b
+INFO:     Loading models:/AirbnbPriceModel@champion from http://host.docker.internal:5001
+INFO:     Model loaded
+Midtown entire home -> {"predicted_price":244.25,"currency":"USD"}
+```
+Ready in ~2 s, running natively, same prediction as every earlier check. ✅
+
+---
+
+### Step 8 — The Full Loop: The Flow Deploys By Itself
+
+The deploy in Step 7 was started by a one-off command. The real goal is that **nobody has to click anything**: the flow promotes a model, then triggers the deploy itself. One more run, same terminal:
+
+```bash
+git pull                        # includes the loud-failure fix (PR #4)
+python orchestrate_training.py
+```
+
+| Time (UTC) | What happened | Where |
+|---|---|---|
+| 17:26:47 | Flow `ruby-aardwolf` starts retraining | Prefect |
+| 17:27:29 | `promoted run b5f34b8e... as AirbnbPriceModel v5 @champion` | Prefect → MLflow |
+| 17:27:29 | `request_deploy` → **COMPLETED** (no warning, no error) | Prefect |
+| 17:27:30 | Deploy run created, `model_version = 5` | GitHub Actions |
+| 17:27:57 | `model-v5` pushed, `amd64` + `arm64` | Docker Hub |
+
+The deploy took only **35 seconds** (vs ~5 minutes for v4): the code hadn't changed, so every Docker layer came from GitHub's build cache, and it mostly just added the new `model-v5` tag.
+
+Docker Hub now:
+```
+latest     pushed 17:27:55 UTC  archs ['amd64', 'arm64']
+model-v5   pushed 17:27:57 UTC  archs ['amd64', 'arm64']
+model-v4   pushed 17:20:33 UTC  archs ['amd64', 'arm64']
+```
+
+---
+
+### What You Should Have at the End of Task 12
+
+```
+NYC-Airbnb-Price-Prediction/
+├── .github/workflows/
+│   ├── ci.yml                  ← PRs: test + build
+│   └── deploy.yml              ← on demand: build amd64+arm64, push to Docker Hub
+├── scripts/
+│   └── trigger_deploy.py       ← raises DeployTriggerError if GitHub refuses
+└── ... (Task 1–11 files)
+```
+
+**GitHub secrets:** `DOCKERHUB_USERNAME`, `DOCKERHUB_TOKEN`
+**Your terminal only:** `GITHUB_TOKEN` (fine-grained, this repo, Actions: Read and write), `GITHUB_REPO`
+**Docker Hub:** `krshikhar13/airbnb-price-api` — `latest`, `model-v3`, `model-v4`, `model-v5`, plus commit-SHA tags
+**MLflow:** `@champion` → **v5**
+**Tests:** 46 passed
+**PRs merged:** #2 deploy workflow · #3 multi-arch · #4 fail loudly
+
+---
+
+# TASK 13 — Docker Compose: MLflow + API Together (Optional)
+
+*Written when Task 13 is built.*
+
+**Preview:** a `docker-compose.yml` that runs the MLflow server and the API as two services on one private network. It uses `MLFLOW_TRACKING_URI=http://mlflow-server:5000` as the single setting every component reads, and a healthcheck so the API only starts once MLflow is actually ready.
