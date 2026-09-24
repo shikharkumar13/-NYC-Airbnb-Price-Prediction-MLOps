@@ -22,8 +22,8 @@
 | **10** | Prefect | Automated, scheduled retraining flow | ✅ Done |
 | **11** | GitHub Actions | CI — tests on every pull request | ✅ Done |
 | **12** | GitHub Actions, Docker Hub | CD — push the image when a new model is promoted | ✅ Done |
-| **13** | Docker Compose | MLflow + API running together (optional) | ⏳ Next |
-| **14** | — | Definition-of-done check + README | ⬜ |
+| **13** | Docker Compose | MLflow + API running together (optional) | ⏭️ Skipped (optional) |
+| **14** | — | Definition-of-done check + README | ✅ Done |
 
 > **How to use this guide:** Each task's section is written once that task is built, using the real commands and outputs from this project, so the guide always matches the code. The step-by-step build plan (with every code file) lives in `docs/superpowers/plans/2026-09-24-nyc-airbnb-price-prediction.md`.
 
@@ -3072,8 +3072,148 @@ NYC-Airbnb-Price-Prediction/
 
 ---
 
-# TASK 13 — Docker Compose: MLflow + API Together (Optional)
+# TASK 13 — Docker Compose: MLflow + API Together (Optional) — ⏭️ Skipped
 
-*Written when Task 13 is built.*
+The spec marks this phase **optional, advanced**. We checked whether skipping it leaves a gap, and it doesn't. Compose would add convenience (one `docker compose up` starting MLflow and the API together, with the API waiting for MLflow's healthcheck). Everything it would demonstrate is already proven separately:
 
-**Preview:** a `docker-compose.yml` that runs the MLflow server and the API as two services on one private network. It uses `MLFLOW_TRACKING_URI=http://mlflow-server:5000` as the single setting every component reads, and a healthcheck so the API only starts once MLflow is actually ready.
+| What Compose would show | Already proven in |
+|---|---|
+| The API container reaching MLflow over a network | Task 9 (`host.docker.internal:5001`) |
+| One setting, `MLFLOW_TRACKING_URI`, read by every component | Tasks 6–12 |
+| Not racing MLflow's startup | Task 6/9 fail-fast settings: a clear exit in 14 s, not a 4-minute hang |
+| `mlflow-server` as an allowed host name | Task 7 (`--allowed-hosts` already includes it) |
+
+The full Compose design (services, named volume, healthcheck-gated `depends_on`) is kept in the build plan (`docs/superpowers/plans/`, Task 13) as a future exercise. On this Mac, map MLflow to host port **5001** (`5001:5000`) and the API to **8001** (`8001:8000`).
+
+---
+
+---
+
+# TASK 14 — Definition of Done and README
+
+---
+
+### What Problem This Solves
+
+"It worked when we built it" isn't the same as "it works now". Later changes (the skops fix, the size budget, the loud-failure fix, the multi-arch build) could have broken something earlier. So at the end we **re-verified every definition-of-done item from the spec (§5) against the current state**, not from memory, and rebuilt the project from GitHub alone.
+
+---
+
+### Step 1 — Re-Verify Every Definition-of-Done Item
+
+| Spec item | How we checked it (today, final state) | Result |
+|---|---|---|
+| **Phase 3** — baseline metrics printed and sane | `python train.py` | RMSE **83.545**, MAE 47.077, R² 0.395 — tens of dollars ✅ |
+| **Phase 6** — all 5 runs in MLflow with params and metrics | Queried every config's latest `FINISHED` run | All 5 present with params, `rmse`/`mae`/`r2`/`model_size_mb` (25 finished runs in total across retrains) ✅ |
+| **Phase 7** — separate process loads `@champion` | New Python process → `load_model("models:/AirbnbPriceModel@champion")` | `@champion` = v5 → `TransformedTargetRegressor`, **$244.25** ✅ |
+| **Phase 9** — all tests pass | `MLFLOW_TRACKING_URI=... pytest` | **46 passed** ✅ |
+| **Phase 9** — breaking a constraint really fails | Loosened `availability_365` to `le=400` (a *different* rule from Task 5) | `FAILED test_invalid_value_is_rejected[availability_365-366]` — `DID NOT RAISE`; restored, 14 passed ✅ |
+| **Phase 10** — a real PR shows CI running | GitHub check-runs for every merged PR | PR #1–#4: `test=success`, `build-image=success` ✅ |
+
+---
+
+### Step 2 — Rebuild From GitHub Alone
+
+The strongest proof that a project is complete: a fresh clone from **GitHub** (not the laptop folder), with nothing else:
+
+```bash
+git clone https://github.com/shikharkumar13/-NYC-Airbnb-Price-Prediction-MLOps.git
+cd -- -NYC-Airbnb-Price-Prediction-MLOps
+dvc pull
+python train.py
+pytest
+```
+```
+cloned main @ f664d6b, 36 files
+dvc pull ok: f772a1d8d29bae6e7a9beac0ae880a2b      ← same MD5 as Task 2
+rows after cleaning: 48464  (train=38771, test=9693)
+rmse: 83.545                                      ← reproduces Task 4 exactly
+43 passed, 3 skipped                              ← registry tests skip without a server
+3 passed                                          ← …and pass when pointed at MLflow
+```
+
+> 💡 **`cd -- -NYC-...`:** the repo name starts with a hyphen, so plain `cd -NYC-...` would be read as an option. `--` means "end of options".
+
+---
+
+### Step 3 — Tidy Up GitHub
+
+The branches from PRs #2–#4 were still on GitHub after merging. Before deleting each one, we checked it was fully contained in `main`:
+
+```bash
+git merge-base --is-ancestor origin/<branch> origin/main && git push origin --delete <branch>
+```
+
+---
+
+### Step 4 — The README
+
+`README.md` is the repo's front page, written for someone who has never seen the project:
+- what it does, with a Mermaid diagram of the whole loop
+- the **results table** and the **champion rule** (≤100 MB, lowest RMSE)
+- key decisions: log target inside the model, cleaning thresholds, the high-cardinality `neighbourhood`, the model not baked into the image
+- project layout, setup (including the Anaconda trap), how to run each part, tests, CI/CD
+- **known limitations**, stated honestly
+
+Detailed explanations stay here in `implementation.md`; the README links to it.
+
+---
+
+---
+
+# Wrap-Up: What We Built, and What We Learned
+
+### The finished system
+
+```mermaid
+flowchart LR
+    DVC["🗂 DVC
+dataset v1
+(md5 f772a1d8…)"] --> PF
+    subgraph PF ["🔁 Prefect flow (weekly, Mon 03:00 UTC)"]
+        direction TB
+        L["load (retries)"] --> T["train ×5"] --> PR["promote ≤100 MB
+lowest RMSE"] --> TD["trigger deploy"]
+    end
+    T -- "runs" --> MLF["📊 MLflow :5001
+@champion = v5"]
+    PR -- "alias" --> MLF
+    TD -- "workflow_dispatch" --> GH["⚙️ GitHub Actions
+deploy.yml"]
+    GH -- "amd64 + arm64" --> HUB["🐳 Docker Hub
+model-v5"]
+    HUB --> API["⚡ API container
+/predict"]
+    API -- "loads @champion" --> MLF
+    PRS["Pull requests"] --> CI["⚙️ ci.yml
+tests + build"]
+```
+
+**Final numbers:** 46 tests · 4 PRs merged with green CI · `@champion` = v5 (`rf_300_depth10`, RMSE $78.75) · image `krshikhar13/airbnb-price-api` for amd64 + arm64.
+
+### Real problems we hit (and what each one teaches)
+
+| # | Problem | Lesson |
+|---|---|---|
+| 1 | Test used a relative path; failed from another folder (Task 3) | Build paths from `__file__`, not the current directory |
+| 2 | `httpx` deprecation warning (Task 6) | Read warnings; they are future errors |
+| 3 | API froze **4 minutes** silently when MLflow was down (Task 6) | Log before slow calls; set retry limits so failures are fast and clear |
+| 4 | Anaconda's `mlflow`/`prefect` shadowing the venv (Tasks 7, 10) | `which <tool>` before trusting a command |
+| 5 | Port 5000 taken by AirPlay; 8000 by another project (Tasks 7, 9) | Check `lsof -iTCP:<port>` before binding; don't kill what isn't yours |
+| 6 | Tree models refused by skops (`UntrustedTypesFoundException`) (Task 7) | Test *every* variant you use; trust only the exact type needed |
+| 7 | A `grep` pipe hid a crash (exit code 0) (Task 7) | Check the real program's exit code |
+| 8 | Best model was 326 MB (Task 8) | "Best metric" isn't the only criterion; make trade-offs explicit, written rules |
+| 9 | Registering through an MLflow 3 fallback (Task 8) | Treat fallback warnings as bugs; use the current API |
+| 10 | `mlflow-skinny` lacked `skops` (Task 9) | Slim images need their dependencies checked explicitly |
+| 11 | Personal email about to go public (Task 11) | Review what you publish *before* the first push |
+| 12 | GitHub API rate limit (Task 12) | Poll gently; stop watchers you don't need |
+| 13 | Image didn't run on Apple Silicon (Task 12) | Build for the platforms your users actually have |
+| 14 | Deploy trigger failed with **403** but the flow said "Completed" (Task 12) | In pipelines, failures must *raise*, not print |
+
+### Where to go next
+
+- **Clean up artifacts** automatically (delete old non-champion runs, then `mlflow gc`), or drop/cap the 326 MB forest.
+- **Better features:** the data has no size, bedroom or amenity information, which caps accuracy (R² ≈ 0.46).
+- **Shared infrastructure:** DVC remote on S3, a hosted MLflow server, the Prefect flow on an always-on machine.
+- **Docker Compose** (Task 13) for one-command local startup.
+- **Monitoring:** log predictions and watch for data drift (new neighbourhoods, price shifts) to decide when retraining actually matters.
