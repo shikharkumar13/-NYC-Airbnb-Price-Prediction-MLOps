@@ -14,8 +14,8 @@
 | **2** | DVC | Versioned dataset with a local remote | ✅ Done |
 | **3** | pandas, scikit-learn, pytest | Shared cleaning + model-building module, tests, CI sample | ✅ Done |
 | **4** | scikit-learn, joblib | Baseline training script (`train.py`) | ✅ Done |
-| **5** | Pydantic | Input/output schemas with validation | ⏳ Next |
-| **6** | FastAPI | Prediction REST API | ⬜ |
+| **5** | Pydantic | Input/output schemas with validation | ✅ Done |
+| **6** | FastAPI | Prediction REST API | ⏳ Next |
 | **7** | MLflow Tracking | Five logged experiments on an MLflow server | ⬜ |
 | **8** | MLflow Registry | Best model promoted to `@champion` | ⬜ |
 | **9** | Docker | Slim API image that loads the champion at startup | ⬜ |
@@ -916,6 +916,209 @@ NYC-Airbnb-Price-Prediction/
 
 # TASK 5 — Pydantic Schemas (`schemas.py`)
 
-*Written when Task 5 is built.*
+---
 
-**Preview:** a `Listing` input model whose fields exactly match the model's 10 features. It includes validation such as NYC-only latitude/longitude bounds (a listing "in Antarctica" is rejected), `minimum_nights ≥ 1` and `availability_365` between 0 and 365. We'll also break a rule on purpose to watch a test fail.
+### What Problem This Solves
+
+Soon (Task 6) anyone will be able to send a listing to our API and get a price back. People — and other programs — send bad data: a typo in `room_type`, `minimum_nights: 0`, a latitude with the sign flipped. A machine-learning model **never complains** about bad input: it just returns a confident-looking, meaningless price.
+
+**Pydantic** is a Python library that checks data against a declared shape *before* it reaches the model. We describe what a valid listing looks like once, and every request is checked automatically. FastAPI uses these schemas directly, so a bad request gets a clear `422` error explaining what's wrong.
+
+```mermaid
+flowchart LR
+    R["Incoming JSON\n(a listing)"] --> V{"Pydantic\nListing schema"}
+    V -- "valid" --> M["Model\n.predict()"]
+    M --> O["PricePrediction\n{predicted_price, currency}"]
+    V -- "invalid" --> E["422 error\n'room_type: must be one of ...'"]
+```
+
+---
+
+### The Rules We Enforce
+
+The schema's fields match the **model's 10 features exactly** — not the raw CSV. No `id`, `name`, `host_name` or `last_review`: the model doesn't use them, so the API doesn't ask for them.
+
+| Field | Rule | Why |
+|---|---|---|
+| `neighbourhood_group` | One of Manhattan, Brooklyn, Queens, Bronx, Staten Island | Only 5 boroughs exist |
+| `room_type` | One of Entire home/apt, Private room, Shared room | Only 3 types in the data |
+| `neighbourhood` | Any non-empty text | 221 values is too many to list; unknown ones are safely ignored by the model (tested in Task 3) |
+| `latitude` | 40.49 – 40.92 | NYC's bounding box, slightly padded around the real data (40.4998 – 40.9131) |
+| `longitude` | -74.26 – -73.70 | Same (real data: -74.2444 – -73.7130) |
+| `minimum_nights` | ≥ 1 | A booking is at least one night |
+| `number_of_reviews` | ≥ 0 | Counts can't be negative |
+| `reviews_per_month` | ≥ 0 | Rates can't be negative |
+| `calculated_host_listings_count` | ≥ 1 | The host has at least this listing |
+| `availability_365` | 0 – 365 | Days in a year |
+
+> 💡 **Why bound latitude/longitude at all?** Without bounds, `latitude: -75` (Antarctica) or `longitude: 73.98` (a flipped sign — that's China) would be accepted, and the model would happily return a price for them. The model has never seen anything outside NYC, so its answer would be meaningless.
+
+---
+
+### Step 1 — Write the Tests First
+
+`tests/test_schemas.py`:
+
+```python
+def test_valid_listing_is_accepted():
+    listing = Listing(**EXAMPLE_LISTING)
+    assert listing.room_type == "Entire home/apt"
+
+
+def test_listing_fields_match_model_features_exactly():
+    assert set(Listing.model_fields) == set(features.FEATURES)
+
+
+@pytest.mark.parametrize(
+    "field, value",
+    [
+        ("room_type", "Castle"),
+        ("neighbourhood_group", "New Jersey"),
+        ("neighbourhood", ""),
+        ("minimum_nights", 0),
+        ("number_of_reviews", -1),
+        ("reviews_per_month", -0.5),
+        ("calculated_host_listings_count", 0),
+        ("availability_365", 366),
+        ("latitude", -75.0),    # Antarctica
+        ("longitude", 73.98),   # sign flipped: that's China
+    ],
+)
+def test_invalid_value_is_rejected(field, value):
+    with pytest.raises(ValidationError):
+        Listing(**{**EXAMPLE_LISTING, field: value})
+```
+
+**What this does:**
+- `@pytest.mark.parametrize` runs one test function 10 times, once per `(field, value)` pair. Each run takes a *valid* listing and breaks exactly **one** field — so if the test fails, we know precisely which rule is missing.
+- `{**EXAMPLE_LISTING, field: value}` copies the valid example and overwrites one field.
+- `pytest.raises(ValidationError)` means "this test passes only if Pydantic rejects the input".
+- `test_listing_fields_match_model_features_exactly` ties the schema to `features.FEATURES`. If someone adds a feature to the model but forgets the API, this test fails.
+
+Two more tests: a listing with a missing field is rejected, and `PricePrediction` defaults its currency to `"USD"`.
+
+Run before `schemas.py` exists:
+```
+E   ModuleNotFoundError: No module named 'schemas'
+```
+✅ Failing for the right reason.
+
+---
+
+### Step 2 — Write `schemas.py`
+
+```python
+from typing import Literal
+
+from pydantic import BaseModel, Field
+
+NYC_LAT_MIN, NYC_LAT_MAX = 40.49, 40.92
+NYC_LON_MIN, NYC_LON_MAX = -74.26, -73.70
+
+EXAMPLE_LISTING = {
+    "neighbourhood_group": "Manhattan",
+    "neighbourhood": "Midtown",
+    "latitude": 40.7549,
+    "longitude": -73.9840,
+    "room_type": "Entire home/apt",
+    "minimum_nights": 2,
+    "number_of_reviews": 20,
+    "reviews_per_month": 1.0,
+    "calculated_host_listings_count": 1,
+    "availability_365": 180,
+}
+
+
+class Listing(BaseModel):
+    model_config = {"json_schema_extra": {"examples": [EXAMPLE_LISTING]}}
+
+    neighbourhood_group: Literal["Manhattan", "Brooklyn", "Queens", "Bronx", "Staten Island"]
+    neighbourhood: str = Field(..., min_length=1)
+    latitude: float = Field(..., ge=NYC_LAT_MIN, le=NYC_LAT_MAX)
+    longitude: float = Field(..., ge=NYC_LON_MIN, le=NYC_LON_MAX)
+    room_type: Literal["Entire home/apt", "Private room", "Shared room"]
+    minimum_nights: int = Field(..., ge=1)
+    number_of_reviews: int = Field(..., ge=0)
+    reviews_per_month: float = Field(..., ge=0)
+    calculated_host_listings_count: int = Field(..., ge=1)
+    availability_365: int = Field(..., ge=0, le=365)
+
+
+class PricePrediction(BaseModel):
+    predicted_price: float
+    currency: str = "USD"
+```
+
+**Reading the syntax:**
+- `Literal[...]` — the value must be exactly one of these strings.
+- `Field(...)` — the `...` means "required, no default".
+- `ge` / `le` — "greater than or equal" / "less than or equal".
+- `min_length=1` — no empty strings.
+- `model_config = {"json_schema_extra": ...}` — puts `EXAMPLE_LISTING` into FastAPI's auto-generated docs page, so the "Try it out" button starts with a valid request (Task 6).
+- `EXAMPLE_LISTING` lives here (not in the tests) so the tests, the API docs, and later tasks all share one known-good listing.
+
+Run the tests:
+```bash
+pytest tests/test_schemas.py -v
+# 14 passed
+```
+
+---
+
+### Step 3 — Break a Rule on Purpose and Watch It Fail
+
+A test that has never failed might not be testing anything. So we deliberately weakened one rule — `minimum_nights: ge=1` → `ge=0` — and re-ran:
+
+```
+E       Failed: DID NOT RAISE ValidationError
+FAILED tests/test_schemas.py::test_invalid_value_is_rejected[minimum_nights-0]
+1 failed, 13 passed
+```
+
+Exactly the one matching test failed, and its name tells us which field and value. After reverting: `14 passed`. ✅
+
+---
+
+### Step 4 — Make Sure We Don't Reject Real Listings
+
+Strict validation has the opposite risk too: bounds so tight they reject real data. We ran every one of the 48,464 cleaned training listings through `Listing`:
+
+```
+validated 48464 real listings, rejected 0
+```
+
+The rules block nonsense without blocking anything the model was trained on. ✅
+
+---
+
+### Step 5 — Commit
+
+```bash
+git add schemas.py tests/test_schemas.py
+git commit -m "feat: Listing/PricePrediction schemas with NYC bounds and tests"
+```
+
+---
+
+### What You Should Have at the End of Task 5
+
+```
+NYC-Airbnb-Price-Prediction/
+├── schemas.py                ← Listing, PricePrediction, EXAMPLE_LISTING
+├── tests/
+│   └── test_schemas.py       ← 14 tests
+└── ... (Task 1–4 files)
+```
+
+**Tests:** 21 passed (7 features + 14 schemas)
+**Commit:** `afa4887 feat: Listing/PricePrediction schemas with NYC bounds and tests`
+
+---
+
+---
+
+# TASK 6 — FastAPI Prediction Service (`main.py`)
+
+*Written when Task 6 is built.*
+
+**Preview:** a web API with `GET /health` and `POST /predict`. It loads the model once at startup from the MLflow registry (`models:/AirbnbPriceModel@champion`), not from a file path. Until MLflow exists (Task 7), we test it with a stand-in "fake model", so the API logic is proven independently of MLflow.
