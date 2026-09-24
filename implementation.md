@@ -15,8 +15,8 @@
 | **3** | pandas, scikit-learn, pytest | Shared cleaning + model-building module, tests, CI sample | ✅ Done |
 | **4** | scikit-learn, joblib | Baseline training script (`train.py`) | ✅ Done |
 | **5** | Pydantic | Input/output schemas with validation | ✅ Done |
-| **6** | FastAPI | Prediction REST API | ⏳ Next |
-| **7** | MLflow Tracking | Five logged experiments on an MLflow server | ⬜ |
+| **6** | FastAPI | Prediction REST API | ✅ Done |
+| **7** | MLflow Tracking | Five logged experiments on an MLflow server | ⏳ Next |
 | **8** | MLflow Registry | Best model promoted to `@champion` | ⬜ |
 | **9** | Docker | Slim API image that loads the champion at startup | ⬜ |
 | **10** | Prefect | Automated, scheduled retraining flow | ⬜ |
@@ -165,15 +165,15 @@ Python 3.11.14
 ### Step 3 — Install Libraries, Then Pin the Versions Actually Installed
 
 ```bash
-uv pip install scikit-learn pandas numpy joblib fastapi uvicorn pydantic mlflow prefect pytest requests httpx
-uv pip freeze | grep -iE '^(scikit-learn|pandas|numpy|joblib|fastapi|uvicorn|pydantic|mlflow|prefect|pytest|requests|httpx)==' > requirements.txt
+uv pip install scikit-learn pandas numpy joblib fastapi uvicorn pydantic mlflow prefect pytest requests httpx2
+uv pip freeze | grep -iE '^(scikit-learn|pandas|numpy|joblib|fastapi|uvicorn|pydantic|mlflow|prefect|pytest|requests|httpx2)==' > requirements.txt
 cat requirements.txt
 ```
 
 Result — `requirements.txt`:
 ```
 fastapi==0.141.1
-httpx==0.28.1
+httpx2==2.13.1
 joblib==1.6.0
 mlflow==3.16.1
 numpy==2.4.6
@@ -200,7 +200,7 @@ uvicorn==0.53.0
 | mlflow | Experiment tracking + model registry |
 | fastapi, uvicorn, pydantic | The prediction API and its input validation |
 | prefect | Orchestrating/scheduling retraining |
-| pytest, httpx | Tests (httpx powers FastAPI's test client) |
+| pytest, httpx2 | Tests (httpx2 powers FastAPI's test client — see the note in Task 6) |
 | requests | Triggering the GitHub deploy workflow |
 
 ---
@@ -1119,6 +1119,267 @@ NYC-Airbnb-Price-Prediction/
 
 # TASK 6 — FastAPI Prediction Service (`main.py`)
 
-*Written when Task 6 is built.*
+---
 
-**Preview:** a web API with `GET /health` and `POST /predict`. It loads the model once at startup from the MLflow registry (`models:/AirbnbPriceModel@champion`), not from a file path. Until MLflow exists (Task 7), we test it with a stand-in "fake model", so the API logic is proven independently of MLflow.
+### What Problem This Solves
+
+A model sitting in a Python file is useless to a website, a mobile app or another team. They need to ask a question over the network — *"what should this listing cost?"* — and get an answer back. **FastAPI** turns our model into a **web API**: a program that listens for HTTP requests and replies with JSON.
+
+```mermaid
+sequenceDiagram
+    participant C as Client (curl, website, app)
+    participant A as FastAPI (main.py)
+    participant P as Pydantic (schemas.py)
+    participant M as Model (loaded once at startup)
+
+    C->>A: POST /predict {listing JSON}
+    A->>P: validate as Listing
+    alt invalid
+        P-->>C: 422 + which field is wrong
+    else valid
+        A->>M: model.predict(1-row DataFrame)
+        M-->>A: 284.37 (already dollars)
+        A-->>C: 200 {"predicted_price": 284.37, "currency": "USD"}
+    end
+```
+
+---
+
+### The Big Design Choice: Load the Model From the Registry, Not a File
+
+The obvious approach is `joblib.load("models/model.pkl")`. The spec explicitly rejects this (the Article 12 lesson): a hardcoded path ties the API to one specific file. Every new model would need someone to copy a file and redeploy.
+
+Instead, `main.py` asks the **MLflow Model Registry** (built in Tasks 7–8) for *whichever model currently holds the `champion` label*:
+
+```python
+MODEL_URI = os.environ.get("MODEL_URI", "models:/AirbnbPriceModel@champion")
+```
+
+| Part | Meaning |
+|---|---|
+| `models:/` | "Look this up in the MLflow Model Registry" |
+| `AirbnbPriceModel` | The registered model's name |
+| `@champion` | An *alias* — a movable label pointing at one version |
+
+Promote a better model → move the `champion` label → restart the API → it serves the new model. **No code change, no rebuild.**
+
+Where is the registry? MLflow reads the `MLFLOW_TRACKING_URI` environment variable itself (e.g. `http://127.0.0.1:5000`). The same code therefore works on the laptop, in CI and in Docker — only the environment variable changes.
+
+---
+
+### Step 1 — Write the Tests First, With a Fake Model
+
+**The problem:** the registry doesn't exist yet (that's Task 7). Should the API tests wait?
+
+**No.** The API has its own logic worth testing: validation, response shape, rounding, never returning a negative price. We swap the real model for a tiny stand-in:
+
+```python
+class FakeModel:
+    """Stands in for the registry model so API tests need no MLflow server."""
+
+    def __init__(self, price):
+        self.price = price
+        self.seen = None
+
+    def predict(self, X):
+        self.seen = X          # remember what the API sent us
+        return np.array([self.price])
+
+
+@pytest.fixture
+def fake_model(monkeypatch):
+    fake = FakeModel(price=123.456)
+    monkeypatch.setattr(main, "load_model", lambda: fake)
+    return fake
+
+
+@pytest.fixture
+def client(fake_model):
+    with TestClient(main.app) as c:  # `with` runs the lifespan (model load)
+        yield c
+```
+
+**What this does:**
+- `monkeypatch.setattr(main, "load_model", ...)` temporarily replaces `main.load_model` for one test, so at startup the app "loads" the fake instead of contacting MLflow. pytest undoes the swap automatically afterwards.
+- `TestClient` sends real HTTP-style requests to the app **in memory** — no server, no port.
+- `with TestClient(...)` is important: only inside a `with` block does FastAPI run its startup code (where the model is loaded).
+- `self.seen` lets a test inspect exactly what the API passed to the model.
+
+The five tests:
+
+| Test | What it proves |
+|---|---|
+| `test_health` | `GET /health` answers `{"status": "ok", ...}` |
+| `test_predict_returns_rounded_usd_price` | `123.456` → `{"predicted_price": 123.46, "currency": "USD"}` |
+| `test_predict_sends_exactly_the_model_features` | The model receives one row with exactly the 10 feature columns |
+| `test_predict_never_returns_negative_price` | A model output of `-5.0` is served as `0.0` |
+| `test_predict_rejects_invalid_listing` | `room_type: "Castle"` → HTTP `422` |
+
+Before `main.py` exists:
+```
+E   ModuleNotFoundError: No module named 'main'
+```
+✅ Failing for the right reason.
+
+---
+
+### Step 2 — Write `main.py`
+
+```python
+MODEL_URI = os.environ.get("MODEL_URI", "models:/AirbnbPriceModel@champion")
+logger = logging.getLogger("uvicorn.error")
+
+
+def load_model():
+    return mlflow.sklearn.load_model(MODEL_URI)
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    logger.info("Loading %s from %s", MODEL_URI, mlflow.get_tracking_uri())
+    app.state.model = load_model()
+    logger.info("Model loaded")
+    yield
+
+
+app = FastAPI(title="NYC Airbnb Price API", lifespan=lifespan)
+
+
+@app.get("/health")
+def health():
+    return {"status": "ok", "model_uri": MODEL_URI}
+
+
+@app.post("/predict", response_model=PricePrediction)
+def predict(listing: Listing) -> PricePrediction:
+    features = pd.DataFrame([listing.model_dump()])
+    price = float(app.state.model.predict(features)[0])
+    return PricePrediction(predicted_price=round(max(price, 0.0), 2))
+```
+
+**What each piece does:**
+- **`lifespan`** — code that runs once when the server starts (before `yield`) and once when it stops (after). Loading a model can take seconds, so we do it **once at startup**, not on every request. It's stored on `app.state.model`.
+- **`load_model()` as its own function** — this is what makes the fake-model tests possible. Tests replace this one function.
+- **`predict(listing: Listing)`** — because the parameter is typed as our Pydantic `Listing`, FastAPI validates the JSON body automatically. Bad input never reaches this function; FastAPI replies `422` on its own.
+- **`listing.model_dump()`** — turns the validated listing into a dict; `pd.DataFrame([...])` makes a one-row table, which is what scikit-learn models expect.
+- **`max(price, 0.0)`** — a price can't be negative. Our log-price model can't actually produce one (`expm1` of any number is > -1), but the API shouldn't rely on that.
+- **No `expm1` here either** — the model converts back to dollars inside `.predict()` (Task 3).
+
+Run the tests:
+```bash
+pytest tests/test_api.py -v
+# 5 passed, 1 warning
+```
+
+---
+
+### Step 3 — Don't Ignore Warnings: the `httpx` → `httpx2` Swap
+
+That "1 warning" was:
+```
+StarletteDeprecationWarning: Using `httpx` with `starlette.testclient` is deprecated; install `httpx2` instead.
+```
+
+Deprecation warnings are the library telling you *"this will break in a future version."* FastAPI's `TestClient` (built on Starlette) now wants `httpx2`. We had pinned `httpx` only for the test client, so:
+
+```bash
+uv pip install httpx2
+pytest -q
+# 26 passed          ← no warning
+```
+
+`requirements.txt` now pins `httpx2==2.13.1` instead of `httpx`. (`httpx` is still installed — Prefect depends on it and pulls it in by itself.)
+
+---
+
+### Step 4 — A Real Live Test (Not Just a Fake Model)
+
+The fake-model tests prove the API logic. We also wanted to prove the *real* loading path works: `mlflow.sklearn.load_model`, the startup hook, and actual HTTP on a real port. We saved Task 4's baseline in MLflow's model format to a temporary folder and pointed `MODEL_URI` at it:
+
+```bash
+MODEL_URI=/tmp/.../baseline_mlflow_model uvicorn main:app --port 8765
+```
+
+Startup log:
+```
+INFO:     Loading /tmp/.../baseline_mlflow_model from sqlite:///.../mlflow.db
+INFO:     Model loaded
+INFO:     Application startup complete.
+```
+
+| Request | Response |
+|---|---|
+| `GET /health` | `{"status":"ok","model_uri":"/tmp/.../baseline_mlflow_model"}` |
+| `POST /predict` Midtown entire home | `{"predicted_price":284.37,"currency":"USD"}` — identical to Task 4's check ✅ |
+| `POST /predict` with `latitude: -75` | HTTP 422: `"Input should be greater than or equal to 40.49"` ✅ |
+| `GET /docs` | HTTP 200 — FastAPI's interactive docs page, pre-filled with `EXAMPLE_LISTING` ✅ |
+
+> 💡 **Try the docs page yourself later.** Once the real model exists (Task 8), run `uvicorn main:app` and open http://127.0.0.1:8000/docs. Click **POST /predict → Try it out → Execute** to get a live prediction from the browser.
+
+---
+
+### Step 5 — What Happens When MLflow Is Down? (A Real Problem We Found)
+
+We started the API pointed at an MLflow server that wasn't running. The API **froze silently for 247 seconds** — over 4 minutes with no output — before finally failing.
+
+**Why:** MLflow's client retries failed requests 7 times, waiting longer after each attempt (2 s, 4 s, 8 s, 16 s, …). Sensible for a training script, but for an API it looks exactly like "the app is broken and I don't know why."
+
+**Fix, part 1 (done now):** `main.py` logs what it's loading and from where *before* trying. Even a slow startup now says what it's waiting on:
+```
+INFO:     Loading models:/AirbnbPriceModel@champion from http://127.0.0.1:5999
+```
+
+**Fix, part 2 (in the Dockerfile, Task 9):** two MLflow settings shorten the retrying:
+
+```bash
+MLFLOW_HTTP_REQUEST_MAX_RETRIES=3 MLFLOW_HTTP_REQUEST_TIMEOUT=10 uvicorn main:app
+```
+```
+INFO:     Loading models:/AirbnbPriceModel@champion from http://127.0.0.1:5999
+mlflow.exceptions.MlflowException: API request to http://127.0.0.1:5999/... failed ...
+ERROR:    Application startup failed. Exiting.
+```
+
+| Setting | Time to fail when MLflow is down |
+|---|---|
+| MLflow defaults (7 retries) | **247 s**, silent |
+| 3 retries, 10 s timeout | ~14 s, with a clear error |
+
+3 retries still rides out a brief MLflow restart, but a truly missing server gives a fast, clear failure — and Docker/Compose can then restart the container.
+
+> ⚠️ **Stuck servers ignore Ctrl-C.** While MLflow is retrying inside startup, a normal stop signal may be ignored. If a test server hangs, find it with `pgrep -fl uvicorn` and stop it with `kill -9 <pid>`.
+
+---
+
+### Step 6 — Commit
+
+```bash
+git add main.py tests/test_api.py requirements.txt docs/
+git commit -m "feat: FastAPI app serving the registry champion, with startup logging"
+```
+
+---
+
+### What You Should Have at the End of Task 6
+
+```
+NYC-Airbnb-Price-Prediction/
+├── main.py                   ← FastAPI app: /health, /predict
+├── requirements.txt          ← httpx → httpx2
+├── tests/
+│   └── test_api.py           ← 5 tests using a FakeModel
+└── ... (Task 1–5 files)
+```
+
+**Tests:** 26 passed, 0 warnings (7 features + 14 schemas + 5 api)
+**Commit:** `f1d6ef3 feat: FastAPI app serving the registry champion, with startup logging`
+
+---
+
+---
+
+# TASK 7 — MLflow Experiment Tracking
+
+*Written when Task 7 is built.*
+
+**Preview:** start a real MLflow server (in its **own terminal — activate the venv there first**), train the five model configurations (LinearRegression, 2× RandomForest, 2× GradientBoosting), and log each run's settings, RMSE/MAE/R² and model to the server. Then compare them in the MLflow web UI at http://127.0.0.1:5000.
