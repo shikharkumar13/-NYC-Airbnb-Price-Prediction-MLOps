@@ -1,6 +1,6 @@
 # Source of `airbnb_mlops_guide.md`
 
-The beginner guide in the repo root is **generated**. Don't edit it directly: edit the files here, then rebuild.
+The beginner guide in the repo root is **generated**, in two formats: `airbnb_mlops_guide.md` and `airbnb_mlops_guide.html`. Don't edit either directly: edit the files here, then rebuild.
 
 | File | Content |
 |---|---|
@@ -13,7 +13,8 @@ The beginner guide in the repo root is **generated**. Don't edit it directly: ed
 | `06_cicd.md` | Chapters 11–12: CI, CD |
 | `07_compose.md` | Chapter 13: Docker Compose |
 | `08_wrapup.md` | Chapter 14, lessons, appendices |
-| `build.py` | Joins the files in number order and fills in the code blocks |
+| `template.html` | The HTML page: layout, styles and the script that renders the embedded Markdown in the browser |
+| `build.py` | Joins the files in number order, fills in the code blocks, and writes both outputs |
 
 ## Code blocks come from the real files
 
@@ -29,8 +30,12 @@ The prose around a code block is **not** automatic. If you change what a file do
 ## Rebuild and check
 
 ```bash
-python docs/guide/build.py            # regenerate airbnb_mlops_guide.md
-python docs/guide/build.py --check    # is it up to date? (exit 1 if not)
+python docs/guide/build.py            # regenerate airbnb_mlops_guide.md and .html
+python docs/guide/build.py --check    # are both up to date? (exit 1 if not)
 ```
 
 `.github/workflows/docs.yml` runs `--check` on every pull request. If a code change alters any file the guide shows and the guide wasn't rebuilt, the check fails and says which command to run.
+
+## The HTML version
+
+`build.py` embeds the finished Markdown in `template.html`; the page renders it when opened, so building needs no extra Python package. Open `airbnb_mlops_guide.html` in a browser (it needs an internet connection for its fonts and libraries). It adds a chapter map, search (`/`), per-chapter progress saved in the browser, copy buttons and a dark theme.

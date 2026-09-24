@@ -3,7 +3,7 @@
 Predicts a New York City Airbnb listing's nightly price (USD) from its location, room type and booking activity. The model is deliberately modest. The point of the project is the **deployment flow around it**: versioned data, tracked experiments, a model registry, a containerised API, scheduled retraining, CI, and continuous deployment triggered by a new model.
 
 **Documentation:**
-- **Build it yourself:** [`airbnb_mlops_guide.md`](airbnb_mlops_guide.md) is a from-scratch tutorial for beginners. It covers every command, file and decision, with the *why* behind each, on macOS (tested) or Windows via WSL2.
+- **Build it yourself:** [`airbnb_mlops_guide.md`](airbnb_mlops_guide.md) is a from-scratch tutorial for beginners. It covers every command, file and decision, with the *why* behind each, on macOS (tested) or Windows via WSL2. The same guide is in [`airbnb_mlops_guide.html`](airbnb_mlops_guide.html): download it and open it in a browser for a chapter map, search and progress tracking.
 - **How this project was actually built:** [`implementation.md`](implementation.md) is the build log, including every detour, bug and fix, with real IDs and dates.
 
 ```mermaid
