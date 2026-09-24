@@ -283,7 +283,7 @@ NYC-Airbnb-Price-Prediction/
 ```
 
 **Git tracks:** everything above except `.venv/`
-**Commit:** `4318ee4 chore: project scaffold, pinned requirements, pytest config`
+**Commit:** `1419a83 chore: project scaffold, pinned requirements, pytest config`
 
 ---
 
@@ -470,7 +470,7 @@ NYC-Airbnb-Price-Prediction/
 
 **Git tracks:** `.dvc/config`, `.dvc/.gitignore`, `.dvcignore`, `data/AB_NYC_2019.csv.dvc`, `data/.gitignore`
 **DVC remote stores:** `AB_NYC_2019.csv`
-**Commit:** `8457c35 data: track AB_NYC_2019.csv with DVC and a local remote`
+**Commit:** `9088fe5 data: track AB_NYC_2019.csv with DVC and a local remote`
 
 ---
 
@@ -753,10 +753,10 @@ NYC-Airbnb-Price-Prediction/
 **Tests:** 7 passed, 0 warnings
 **Commits:**
 ```
-1661398 test: cwd-independent sample path, cover unseen categories; fix CI rehearsal in plan
-1122c44 feat: shared cleaning/pipeline module with log-target model and CI sample
-8457c35 data: track AB_NYC_2019.csv with DVC and a local remote
-4318ee4 chore: project scaffold, pinned requirements, pytest config
+9e90207 test: cwd-independent sample path, cover unseen categories; fix CI rehearsal in plan
+e29ded8 feat: shared cleaning/pipeline module with log-target model and CI sample
+9088fe5 data: track AB_NYC_2019.csv with DVC and a local remote
+1419a83 chore: project scaffold, pinned requirements, pytest config
 ```
 
 ---
@@ -908,7 +908,7 @@ NYC-Airbnb-Price-Prediction/
 ```
 
 **Baseline to beat:** RMSE $83.55 · MAE $47.08 · R² 0.395
-**Commit:** `3eb494b feat: baseline LinearRegression training script (log-price target)`
+**Commit:** `4f1e4c8 feat: baseline LinearRegression training script (log-price target)`
 
 ---
 
@@ -1111,7 +1111,7 @@ NYC-Airbnb-Price-Prediction/
 ```
 
 **Tests:** 21 passed (7 features + 14 schemas)
-**Commit:** `afa4887 feat: Listing/PricePrediction schemas with NYC bounds and tests`
+**Commit:** `f8773d9 feat: Listing/PricePrediction schemas with NYC bounds and tests`
 
 ---
 
@@ -1372,7 +1372,7 @@ NYC-Airbnb-Price-Prediction/
 ```
 
 **Tests:** 26 passed, 0 warnings (7 features + 14 schemas + 5 api)
-**Commit:** `f1d6ef3 feat: FastAPI app serving the registry champion, with startup logging`
+**Commit:** `09fadaa feat: FastAPI app serving the registry champion, with startup logging`
 
 ---
 
@@ -1697,8 +1697,8 @@ NYC-Airbnb-Price-Prediction/
 **Tests:** 33 passed
 **Commits:**
 ```
-32b81d2 fix: trust sklearn Tree type so tree models can be logged with MLflow's skops format
-fd15d54 feat: MLflow experiment tracking for five regression configs
+7d10a0e fix: trust sklearn Tree type so tree models can be logged with MLflow's skops format
+2fae35a feat: MLflow experiment tracking for five regression configs
 ```
 
 ---
@@ -1952,7 +1952,7 @@ NYC-Airbnb-Price-Prediction/
 
 **MLflow registry:** `AirbnbPriceModel` v1 = `rf_300_depth10`, alias `@champion`
 **Tests:** 42 passed with the server configured (39 passed + 3 skipped without it)
-**Commit:** `8d99955 feat: register best run as AirbnbPriceModel@champion with a 100 MB size budget`
+**Commit:** `772e04a feat: register best run as AirbnbPriceModel@champion with a 100 MB size budget`
 
 ---
 
@@ -2242,7 +2242,7 @@ docker run -d --name airbnb-api -p 8001:8000 \
   -e MLFLOW_TRACKING_URI=http://host.docker.internal:5001 airbnb-price-api:local
 # → http://localhost:8001/docs
 ```
-**Commit:** `87ac39f feat: slim Docker image that loads the champion from MLflow at startup`
+**Commit:** `a1b9c73 feat: slim Docker image that loads the champion from MLflow at startup`
 
 ---
 
@@ -2544,7 +2544,7 @@ NYC-Airbnb-Price-Prediction/
 **Prefect deployment:** `airbnb-price-training/weekly-retrain`, cron `0 3 * * 1` (UTC), currently **paused**
 **MLflow registry:** `@champion` → **v3** (`rf_300_depth10`, promoted automatically by the flow)
 **Tests:** 45 passed with the MLflow server configured
-**Commit:** `f9cb16e feat: Prefect training flow with retries, promotion and deploy trigger`
+**Commit:** `d59e688 feat: Prefect training flow with retries, promotion and deploy trigger`
 
 ---
 
