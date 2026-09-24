@@ -1,0 +1,4 @@
+[core]
+    remote = localremote
+['remote "localremote"']
+    url = /Users/kumarshikhar/dvc-storage/nyc-airbnb-price
