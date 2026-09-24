@@ -22,7 +22,7 @@
 | **10** | Prefect | Automated, scheduled retraining flow | ✅ Done |
 | **11** | GitHub Actions | CI — tests on every pull request | ✅ Done |
 | **12** | GitHub Actions, Docker Hub | CD — push the image when a new model is promoted | ✅ Done |
-| **13** | Docker Compose | MLflow + API running together (optional) | ⏭️ Skipped (optional) |
+| **13** | Docker Compose | MLflow + API running together (optional) | ✅ Done |
 | **14** | — | Definition-of-done check + README | ✅ Done |
 
 > **How to use this guide:** Each task's section is written once that task is built, using the real commands and outputs from this project, so the guide always matches the code. The step-by-step build plan (with every code file) lives in `docs/superpowers/plans/2026-09-24-nyc-airbnb-price-prediction.md`.
@@ -3072,18 +3072,196 @@ NYC-Airbnb-Price-Prediction/
 
 ---
 
-# TASK 13 — Docker Compose: MLflow + API Together (Optional) — ⏭️ Skipped
+# TASK 13 — Docker Compose: MLflow + API Together
 
-The spec marks this phase **optional, advanced**. We checked whether skipping it leaves a gap, and it doesn't. Compose would add convenience (one `docker compose up` starting MLflow and the API together, with the API waiting for MLflow's healthcheck). Everything it would demonstrate is already proven separately:
+*(Optional in the spec. First skipped, then added at the end, after Task 14.)*
 
-| What Compose would show | Already proven in |
+---
+
+### What Problem This Solves
+
+Running the stack by hand meant: a terminal for `mlflow server` with a long list of flags, then a separate `docker run` for the API with the right port and `MLFLOW_TRACKING_URI`, started in the right order. **Docker Compose** describes all of that in one file, `docker-compose.yml`, and starts it with one command. It also handles the ordering: the API must not start before MLflow is ready, or it has nothing to load its model from.
+
+```mermaid
+flowchart LR
+    subgraph mac ["Your Mac"]
+        subgraph net ["Compose network: nyc-airbnb-price-prediction_default"]
+            MLF["mlflow-server
+:5000 inside
+healthcheck /health"]
+            API["api
+:8000 inside"]
+            API -- "http://mlflow-server:5000
+(service name = hostname)" --> MLF
+        end
+        DISK[("./mlflow.db
+./mlartifacts")]
+        MLF -- "bind mount .:/mlflow" --> DISK
+        HOST["Host tools: Prefect flow,
+pytest, browser"]
+    end
+    HOST -- "127.0.0.1:5001" --> MLF
+    HOST -- "127.0.0.1:8001" --> API
+```
+
+---
+
+### Step 1 — The Decision: Reuse the Existing MLflow Data
+
+| Option | Trade-off |
 |---|---|
-| The API container reaching MLflow over a network | Task 9 (`host.docker.internal:5001`) |
-| One setting, `MLFLOW_TRACKING_URI`, read by every component | Tasks 6–12 |
-| Not racing MLflow's startup | Task 6/9 fail-fast settings: a clear exit in 14 s, not a 4-minute hang |
-| `mlflow-server` as an allowed host name | Task 7 (`--allowed-hosts` already includes it) |
+| **Reuse `./mlflow.db` + `./mlartifacts`** ✅ | All runs, v1–v5 and `@champion` carry over. Compose becomes a drop-in replacement for the MLflow terminal, and host tools keep using `http://127.0.0.1:5001` unchanged. You must stop the host server first. |
+| Fresh Docker volume | Clean and isolated, but empty: the flow must run first to create a champion, and you'd have two separate MLflow histories |
 
-The full Compose design (services, named volume, healthcheck-gated `depends_on`) is kept in the build plan (`docs/superpowers/plans/`, Task 13) as a future exercise. On this Mac, map MLflow to host port **5001** (`5001:5000`) and the API to **8001** (`8001:8000`).
+> ⚠️ **Never run two MLflow servers on the same SQLite file.** SQLite is a single file with simple locking. Two servers writing it at once can corrupt it. So the host `mlflow server` (terminal 1) was stopped with Ctrl-C before Compose started.
+
+**Backup first.** Before anything touched the data, we took a consistent snapshot with SQLite's online backup API (safe even while the server was running) into `~/mlflow-backups/nyc-airbnb/`, and verified it:
+```
+integrity: ok | registered versions: 5 | aliases: [('champion', 5)]
+```
+
+**Same MLflow version in the container.** A different server version might try to *migrate* the database schema. We checked that the official image for our exact version exists for Apple Silicon, and what it contains:
+```
+ghcr.io/mlflow/mlflow:v3.16.1 exists | platforms: ['linux/amd64', 'linux/arm64']
+mlflow 3.16.1 | python 3.11.15
+```
+
+---
+
+### Step 2 — `docker-compose.yml`
+
+```yaml
+services:
+  mlflow-server:
+    image: ghcr.io/mlflow/mlflow:v3.16.1   # same version as requirements.txt, so same DB schema
+    command: >
+      mlflow server
+      --backend-store-uri sqlite:////mlflow/mlflow.db
+      --artifacts-destination /mlflow/mlartifacts
+      --host 0.0.0.0 --port 5000
+      --allowed-hosts "localhost:*,127.0.0.1:*,mlflow-server:*"
+    volumes:
+      # The whole folder, not just mlflow.db: SQLite writes its journal file
+      # next to the database, and that must land on disk, not in the container.
+      - .:/mlflow
+    ports:
+      - "5001:5000"   # host 5001: macOS AirPlay Receiver holds 5000
+    healthcheck:
+      # The MLflow image has Python but not necessarily curl.
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:5000/health')"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+
+  api:
+    build: .
+    image: airbnb-price-api:local
+    environment:
+      MLFLOW_TRACKING_URI: http://mlflow-server:5000
+    ports:
+      - "8001:8000"   # host 8000 is used by another project's container
+    depends_on:
+      mlflow-server:
+        condition: service_healthy   # don't race MLflow's startup
+    restart: on-failure
+```
+
+**Reading it:**
+
+| Part | Meaning |
+|---|---|
+| `services:` | Each entry becomes a container. Compose puts them all on one private network |
+| `image: ghcr.io/mlflow/mlflow:v3.16.1` | Official MLflow image, pinned to our exact version |
+| `sqlite:////mlflow/mlflow.db` | Four slashes = `sqlite:///` + the absolute path `/mlflow/mlflow.db` |
+| `volumes: - .:/mlflow` | **Bind mount**: this project folder appears inside the container at `/mlflow` |
+| `ports: "5001:5000"` | `host:container` — reach MLflow from the Mac at 5001; inside the network it's still 5000 |
+| `healthcheck` | Every 10 s, Docker asks MLflow's `/health` endpoint; after success the container is `healthy` |
+| `build: .` + `image:` | Build the API from our `Dockerfile` and name it `airbnb-price-api:local`, the same name as in Task 9 |
+| `MLFLOW_TRACKING_URI: http://mlflow-server:5000` | Inside the network, **a service's name is its hostname**. It's still the one setting every component reads |
+| `depends_on: condition: service_healthy` | Don't start the API until MLflow is *healthy* — not merely *started*. A started server may still be loading |
+| `restart: on-failure` | If the API exits with an error (e.g. MLflow went away), Docker restarts it |
+
+> 💡 **Why mount the folder and not just `mlflow.db`?** While SQLite saves changes it writes a temporary *journal* file **next to** the database. If only the `.db` file were mounted, the journal would live inside the container. A crash mid-write could then leave the database damaged. Mounting the folder keeps database and journal together on your disk.
+
+Check the file before running anything:
+```bash
+docker compose config --quiet && echo "compose file valid"
+```
+`docker compose config` also shows how Compose parsed the command. The `--allowed-hosts` value arrives as one clean argument, `localhost:*,127.0.0.1:*,mlflow-server:*`, without the quote marks.
+
+---
+
+### Step 3 — Start It and Watch the Ordering
+
+```bash
+docker compose up -d --build
+```
+```
+ Container ...-mlflow-server-1 Started
+ Container ...-mlflow-server-1 Waiting
+ Container ...-mlflow-server-1 Healthy
+ Container ...-api-1 Starting
+ Container ...-api-1 Started
+```
+
+| Event | Time (UTC) |
+|---|---|
+| mlflow-server started | 17:51:48 |
+| mlflow-server first healthy check | 17:51:53 |
+| api started | 17:51:53 |
+
+The API started **the same second** MLflow became healthy — not before.
+
+```bash
+docker compose logs api
+```
+```
+INFO:     Loading models:/AirbnbPriceModel@champion from http://mlflow-server:5000
+INFO:     Model loaded
+INFO:     Application startup complete.
+```
+
+---
+
+### Step 4 — Verify
+
+| Check | Result |
+|---|---|
+| `POST localhost:8001/predict` (Midtown entire home) | **$244.25** — same as every earlier check ✅ |
+| History carried over | 25 finished runs · versions `[1, 2, 3, 4, 5]` · `{'champion': '5'}` ✅ |
+| Host tools unchanged (`MLFLOW_TRACKING_URI=http://127.0.0.1:5001`) | Load champion OK; `pytest` → 46 passed ✅ |
+| **Writes** through the Compose server land on your disk | Test artifact at `mlartifacts/2/…/check.txt`, owned by **your** user (uid 501), not root ✅ |
+| `docker compose down` → `up -d` | Still `@champion` = v5, still $244.25 — data lives on disk, not in containers ✅ |
+
+The write check matters because the weekly Prefect flow **writes** new runs and models. The MLflow container runs as root, but Docker Desktop on macOS maps files written to a bind mount back to your own user, so they stay normal files you can manage. (We used a throwaway experiment, `compose-write-check`, and soft-deleted it afterwards.)
+
+---
+
+### Step 5 — Everyday Commands
+
+```bash
+docker compose up -d            # start both (API waits for MLflow)
+docker compose ps               # status + health
+docker compose logs -f api      # follow the API's logs
+docker compose restart api      # after promoting a new champion: reload the model
+docker compose down             # stop and remove containers (data stays on disk)
+```
+
+The Prefect flow works exactly as before, still pointing at `http://127.0.0.1:5001`. After it promotes a new champion, `docker compose restart api` makes the local API serve it.
+
+---
+
+### What You Should Have at the End of Task 13
+
+```
+NYC-Airbnb-Price-Prediction/
+├── docker-compose.yml     ← mlflow-server + api, healthcheck-gated
+└── ... (all earlier files)
+```
+
+**Replaces:** terminal 1 (`mlflow server …`) and the separate `docker run` for the API
+**Backup:** `~/mlflow-backups/nyc-airbnb/mlflow-before-compose-20260924-2320.db`
 
 ---
 
@@ -3189,7 +3367,7 @@ model-v5"]
 tests + build"]
 ```
 
-**Final numbers:** 46 tests · 4 PRs merged with green CI · `@champion` = v5 (`rf_300_depth10`, RMSE $78.75) · image `krshikhar13/airbnb-price-api` for amd64 + arm64.
+**Final numbers:** 46 tests · 6 PRs merged with green CI · `@champion` = v5 (`rf_300_depth10`, RMSE $78.75) · image `krshikhar13/airbnb-price-api` for amd64 + arm64 · local stack via `docker compose up -d`.
 
 ### Real problems we hit (and what each one teaches)
 
@@ -3209,11 +3387,11 @@ tests + build"]
 | 12 | GitHub API rate limit (Task 12) | Poll gently; stop watchers you don't need |
 | 13 | Image didn't run on Apple Silicon (Task 12) | Build for the platforms your users actually have |
 | 14 | Deploy trigger failed with **403** but the flow said "Completed" (Task 12) | In pipelines, failures must *raise*, not print |
+| 15 | Moving MLflow into Compose risked two servers on one SQLite file (Task 13) | Back up first, stop the old server, pin the same server version, and mount the folder so SQLite's journal stays on disk |
 
 ### Where to go next
 
 - **Clean up artifacts** automatically (delete old non-champion runs, then `mlflow gc`), or drop/cap the 326 MB forest.
 - **Better features:** the data has no size, bedroom or amenity information, which caps accuracy (R² ≈ 0.46).
 - **Shared infrastructure:** DVC remote on S3, a hosted MLflow server, the Prefect flow on an always-on machine.
-- **Docker Compose** (Task 13) for one-command local startup.
 - **Monitoring:** log predictions and watch for data drift (new neighbourhoods, price shifts) to decide when retraining actually matters.
