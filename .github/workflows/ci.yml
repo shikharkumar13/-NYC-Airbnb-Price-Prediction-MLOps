@@ -1,0 +1,48 @@
+name: CI
+
+on:
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    env:
+      MLFLOW_TRACKING_URI: http://127.0.0.1:5000
+      # The DVC remote lives on a laptop; CI trains on the committed sample.
+      DATA_PATH: tests/fixtures/listings_sample.csv
+      MLFLOW_DISABLE_AGENT_HINT: "1"
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.11"
+          cache: pip
+      - run: pip install -r requirements.txt
+      - name: Start ephemeral MLflow server
+        run: |
+          mlflow server --backend-store-uri sqlite:///mlflow.db \
+            --artifacts-destination ./mlartifacts \
+            --host 127.0.0.1 --port 5000 > mlflow.log 2>&1 &
+          for i in $(seq 1 60); do
+            curl -sf http://127.0.0.1:5000/health && exit 0
+            sleep 2
+          done
+          cat mlflow.log
+          exit 1
+      - name: Seed AirbnbPriceModel@champion
+        run: python -m scripts.ci_seed_model
+      - run: pytest -v
+
+  build-image:
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: docker/setup-buildx-action@v4
+      - uses: docker/build-push-action@v7
+        with:
+          context: .
+          push: false
+          tags: airbnb-price-api:ci
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
