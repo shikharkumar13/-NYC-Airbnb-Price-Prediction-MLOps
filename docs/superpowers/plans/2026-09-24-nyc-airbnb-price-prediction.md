@@ -460,23 +460,39 @@ SAMPLE_PATH = Path(__file__).parent / "fixtures" / "listings_sample.csv"
 
 
 @pytest.fixture(scope="session")
-def sample_splits():
+def sample_path():
+    """Absolute path, so tests pass no matter which directory pytest runs from."""
+    return SAMPLE_PATH
+
+
+@pytest.fixture(scope="session")
+def sample_splits(sample_path):
     """(X_train, X_test, y_train, y_test) from the committed 2,000-row sample."""
-    return split_data(clean_data(load_data(SAMPLE_PATH)))
+    return split_data(clean_data(load_data(sample_path)))
 ```
 
-- [ ] **Step 7: Add a split test to `tests/test_features.py`, run, confirm pass**
+- [ ] **Step 7: Add split + unseen-category tests to `tests/test_features.py`, run, confirm pass**
 
 ```python
-def test_split_data_is_reproducible_80_20(sample_splits):
+def test_split_data_is_reproducible_80_20(sample_splits, sample_path):
     X_train, X_test, y_train, y_test = sample_splits
     assert len(X_test) / (len(X_train) + len(X_test)) == pytest.approx(0.2, abs=0.01)
     assert list(X_train.columns) == features.FEATURES
-    again = features.split_data(features.clean_data(features.load_data("tests/fixtures/listings_sample.csv")))
+    again = features.split_data(features.clean_data(features.load_data(sample_path)))
     assert again[0].index.equals(X_train.index)
+
+
+def test_model_tolerates_unseen_neighbourhood(raw_df):
+    # 221 neighbourhoods means the API will eventually receive one the model
+    # never saw; handle_unknown="ignore" must turn that into zeros, not a crash.
+    cleaned = features.clean_data(raw_df)
+    X, y = cleaned[features.FEATURES], cleaned["price"]
+    model = features.build_model(DummyRegressor(strategy="mean")).fit(X, y)
+    unseen = X.iloc[[0]].assign(neighbourhood="Nowhere Heights")
+    assert model.predict(unseen)[0] > 0
 ```
 
-Run: `pytest tests/test_features.py -v` → Expected: 6 passed.
+Run: `pytest tests/test_features.py -v` → Expected: 7 passed.
 
 - [ ] **Step 8: Commit**
 
@@ -826,7 +842,7 @@ def predict(listing: Listing) -> PricePrediction:
 - [ ] **Step 4: Run all tests**
 
 Run: `pytest -v`
-Expected: 25 passed (6 features + 14 schemas + 5 api).
+Expected: 26 passed (7 features + 14 schemas + 5 api).
 
 - [ ] **Step 5: Commit**
 
@@ -1594,12 +1610,14 @@ if __name__ == "__main__":
 - [ ] **Step 2: Rehearse CI locally against a throwaway server** (so the first real CI run isn't the first test)
 
 ```bash
-cd "$(mktemp -d)" && mlflow server --backend-store-uri sqlite:///mlflow.db --artifacts-destination ./mlartifacts --host 127.0.0.1 --port 5055 > mlflow.log 2>&1 &
-cd -
-sleep 15
+# Parentheses: the cd happens only inside the background subshell, so this
+# terminal stays in the repo root and the throwaway server's files go to a temp dir.
+(cd "$(mktemp -d)" && exec mlflow server --backend-store-uri sqlite:///mlflow.db --artifacts-destination ./mlartifacts --host 127.0.0.1 --port 5055 > mlflow.log 2>&1) &
+until curl -sf http://127.0.0.1:5055/health >/dev/null; do sleep 2; done
 MLFLOW_TRACKING_URI=http://127.0.0.1:5055 DATA_PATH=tests/fixtures/listings_sample.csv python -m scripts.ci_seed_model
 MLFLOW_TRACKING_URI=http://127.0.0.1:5055 DATA_PATH=tests/fixtures/listings_sample.csv pytest -v
-kill %1
+pkill -f "mlflow server.*--port 5055"   # mlflow spawns worker processes; kill them all
+lsof -nP -iTCP:5055 -sTCP:LISTEN || echo "port 5055 free"
 ```
 Expected: `seeded AirbnbPriceModel v1 @champion ...` and all tests pass (none skipped).
 

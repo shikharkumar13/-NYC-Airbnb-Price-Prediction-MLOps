@@ -63,9 +63,19 @@ def test_evaluate_returns_dollar_scale_metrics(raw_df):
     assert metrics["rmse"] > 100  # errors are in dollars, not log units
 
 
-def test_split_data_is_reproducible_80_20(sample_splits):
+def test_split_data_is_reproducible_80_20(sample_splits, sample_path):
     X_train, X_test, y_train, y_test = sample_splits
     assert len(X_test) / (len(X_train) + len(X_test)) == pytest.approx(0.2, abs=0.01)
     assert list(X_train.columns) == features.FEATURES
-    again = features.split_data(features.clean_data(features.load_data("tests/fixtures/listings_sample.csv")))
+    again = features.split_data(features.clean_data(features.load_data(sample_path)))
     assert again[0].index.equals(X_train.index)
+
+
+def test_model_tolerates_unseen_neighbourhood(raw_df):
+    # 221 neighbourhoods means the API will eventually receive one the model
+    # never saw; handle_unknown="ignore" must turn that into zeros, not a crash.
+    cleaned = features.clean_data(raw_df)
+    X, y = cleaned[features.FEATURES], cleaned["price"]
+    model = features.build_model(DummyRegressor(strategy="mean")).fit(X, y)
+    unseen = X.iloc[[0]].assign(neighbourhood="Nowhere Heights")
+    assert model.predict(unseen)[0] > 0
