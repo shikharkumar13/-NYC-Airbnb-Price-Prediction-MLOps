@@ -16,8 +16,8 @@
 | **4** | scikit-learn, joblib | Baseline training script (`train.py`) | ✅ Done |
 | **5** | Pydantic | Input/output schemas with validation | ✅ Done |
 | **6** | FastAPI | Prediction REST API | ✅ Done |
-| **7** | MLflow Tracking | Five logged experiments on an MLflow server | ⏳ Next |
-| **8** | MLflow Registry | Best model promoted to `@champion` | ⬜ |
+| **7** | MLflow Tracking | Five logged experiments on an MLflow server | ✅ Done |
+| **8** | MLflow Registry | Best model promoted to `@champion` | ⏳ Next |
 | **9** | Docker | Slim API image that loads the champion at startup | ⬜ |
 | **10** | Prefect | Automated, scheduled retraining flow | ⬜ |
 | **11** | GitHub Actions | CI — tests on every pull request | ⬜ |
@@ -1380,6 +1380,333 @@ NYC-Airbnb-Price-Prediction/
 
 # TASK 7 — MLflow Experiment Tracking
 
-*Written when Task 7 is built.*
+---
 
-**Preview:** start a real MLflow server (in its **own terminal — activate the venv there first**), train the five model configurations (LinearRegression, 2× RandomForest, 2× GradientBoosting), and log each run's settings, RMSE/MAE/R² and model to the server. Then compare them in the MLflow web UI at http://127.0.0.1:5000.
+### What Problem This Solves
+
+In Task 4 we trained one model and printed three numbers to the terminal. Now we want to try five different models. Without a system, you end up with a notebook of scribbled results: *"was it the 300-tree forest with depth 10 that got 78.7, or the 100-tree one? Which file is that model?"*
+
+**MLflow Tracking** records every training attempt — called a **run** — in one place: its settings (**parameters**), its scores (**metrics**), and the trained model itself (an **artifact**). A web UI lets you sort and compare runs side by side.
+
+```mermaid
+flowchart LR
+    subgraph script ["track_experiments.py (your terminal)"]
+        R1["run: linreg_baseline"]
+        R2["run: rf_100"]
+        R3["run: rf_300_depth10"]
+        R4["run: gb_100_lr01"]
+        R5["run: gb_200_lr005"]
+    end
+    subgraph server ["MLflow server :5001 (its own terminal)"]
+        DB[("mlflow.db\nparams + metrics")]
+        ART[("mlartifacts/\nsaved models")]
+        UI["Web UI\nhttp://127.0.0.1:5001"]
+    end
+    R1 & R2 & R3 & R4 & R5 -- "HTTP: log params,\nmetrics, model" --> server
+    DB --> UI
+    ART --> UI
+```
+
+---
+
+### Pre-Check — Port 5000 Is Taken on Macs
+
+MLflow's default port is 5000. On macOS, **AirPlay Receiver** (process name `ControlCenter`) usually holds it:
+
+```bash
+lsof -nP -iTCP:5000 -sTCP:LISTEN
+```
+```
+COMMAND    PID         USER   FD   TYPE ... NAME
+ControlCe 1132 kumarshikhar   12u  IPv4 ... TCP *:5000 (LISTEN)
+```
+
+Two options: turn off AirPlay Receiver (System Settings → General → AirDrop & Handoff), or use another port. **We use port 5001 on this laptop.** Inside CI and Docker Compose (later tasks) MLflow still runs on 5000 — those are separate machines/networks where AirPlay doesn't exist.
+
+---
+
+### Step 1 — Start the MLflow Server (in Its Own Terminal)
+
+The server must keep running while we work, so it gets a dedicated terminal window.
+
+```bash
+# NEW terminal window:
+cd "/Users/kumarshikhar/MLOps Projects/NYC-Airbnb-Price-Prediction"
+source .venv/bin/activate          # ⚠️ new terminal = activate again
+which mlflow                       # must point into .venv/ — see the trap below
+
+mlflow server \
+  --backend-store-uri sqlite:///mlflow.db \
+  --artifacts-destination ./mlartifacts \
+  --host 0.0.0.0 --port 5001 \
+  --allowed-hosts "localhost:*,127.0.0.1:*,host.docker.internal:*,mlflow-server:*"
+```
+
+Ready when you see:
+```
+INFO:     Uvicorn running on http://0.0.0.0:5001 (Press CTRL+C to quit)
+```
+
+**What each flag does:**
+
+| Flag | Meaning |
+|---|---|
+| `--backend-store-uri sqlite:///mlflow.db` | Run details (params, metrics, later the model registry) go in a small database file |
+| `--artifacts-destination ./mlartifacts` | Saved models go in `mlartifacts/`, **and the server hands them out over HTTP**. Clients never need direct access to the folder — that's what lets a Docker container download a model in Task 9 |
+| `--host 0.0.0.0` | Accept connections from everywhere on this machine, including Docker containers (`127.0.0.1` would accept only this laptop's own programs) |
+| `--port 5001` | Avoids AirPlay's port 5000 |
+| `--allowed-hosts ...` | Security allow-list of names clients may use to reach the server |
+
+> ⚠️ **The Anaconda trap.** If you see `ImportError: cannot import name 'service' from 'google.protobuf'`, your terminal is running **Anaconda's** `mlflow` (`/opt/anaconda3/bin/mlflow`), whose libraries are incompatible — not the project's. Check with `which mlflow`. Fix: `conda deactivate` (if the prompt shows `(base)`), then `source .venv/bin/activate`. Or bypass the question entirely by calling `.venv/bin/mlflow server ...`.
+
+---
+
+### Step 2 — Verify the Server From the Working Terminal
+
+```bash
+curl -s http://127.0.0.1:5001/health
+# OK
+```
+
+Check that the allow-list really lets Docker-style names in and keeps strangers out:
+```bash
+for h in host.docker.internal:5001 mlflow-server:5000 evil.example.com; do
+  curl -s -o /dev/null -w "$h -> %{http_code}\n" -H "Host: $h" \
+    "http://127.0.0.1:5001/api/2.0/mlflow/experiments/search?max_results=1"
+done
+```
+```
+host.docker.internal:5001 -> 200
+mlflow-server:5000 -> 200
+evil.example.com -> 403
+```
+
+> 💡 **zsh gotcha:** quote URLs containing `?`. Unquoted, zsh treats `?` as a filename wildcard and fails with `no matches found`.
+
+---
+
+### Step 3 — `registry.py`: One Home for MLflow Names
+
+```python
+EXPERIMENT_NAME = "airbnb-price-prediction"
+MODEL_NAME = "AirbnbPriceModel"
+CHAMPION_ALIAS = "champion"
+
+
+def require_tracking_uri() -> str:
+    uri = os.environ.get("MLFLOW_TRACKING_URI")
+    if not uri:
+        sys.exit(
+            "MLFLOW_TRACKING_URI is not set. Start the server (see implementation.md, Task 7) and run:\n"
+            "  export MLFLOW_TRACKING_URI=http://127.0.0.1:5001"
+        )
+    return uri
+```
+
+**Why `require_tracking_uri`?** If `MLFLOW_TRACKING_URI` isn't set, MLflow doesn't complain — it silently writes to a local database file instead of your server. You'd then wonder why nothing appears in the UI. This check turns that silent mistake into a clear message. (Task 8 adds the model-promotion helpers to this file.)
+
+---
+
+### Step 4 — `track_experiments.py`: Five Runs, One Loop
+
+The five configurations from the spec, as data:
+
+```python
+CONFIGS = {
+    "linreg_baseline": (LinearRegression, {}),
+    "rf_100": (RandomForestRegressor, {"n_estimators": 100, "n_jobs": -1, "random_state": RANDOM_STATE}),
+    "rf_300_depth10": (RandomForestRegressor, {"n_estimators": 300, "max_depth": 10, "n_jobs": -1, "random_state": RANDOM_STATE}),
+    "gb_100_lr01": (GradientBoostingRegressor, {"n_estimators": 100, "learning_rate": 0.1, "random_state": RANDOM_STATE}),
+    "gb_200_lr005": (GradientBoostingRegressor, {"n_estimators": 200, "learning_rate": 0.05, "random_state": RANDOM_STATE}),
+}
+```
+
+And one function that trains and logs any of them:
+
+```python
+def train_and_log(run_name, X_train, X_test, y_train, y_test):
+    """Fit one config inside an MLflow run. Returns (run_id, metrics)."""
+    model_class, params = CONFIGS[run_name]
+    with mlflow.start_run(run_name=run_name) as run:
+        model = build_model(model_class(**params)).fit(X_train, y_train)
+        metrics = evaluate(model, X_test, y_test)
+        mlflow.log_params(
+            {"model_type": model_class.__name__, "target_transform": "log1p/expm1", **params}
+        )
+        mlflow.log_metrics(metrics)
+        mlflow.sklearn.log_model(
+            model,
+            name="model",
+            input_example=X_train.head(3),
+            skops_trusted_types=SKOPS_TRUSTED_TYPES,
+        )
+    return run.info.run_id, metrics
+```
+
+**What each piece does:**
+- `with mlflow.start_run(...)` — everything logged inside the `with` block belongs to one run. If the code crashes inside, MLflow marks the run `FAILED` instead of leaving it half-finished.
+- `build_model(...)` — the **same** preprocessing and log-price wrapping as the baseline (Task 3). Only the regressor changes, so the comparison is fair.
+- `log_params` — the settings, plus `model_type` and `target_transform` so anyone reading the run later knows what it is.
+- `log_metrics` — RMSE/MAE/R² in dollars.
+- `log_model(..., name="model")` — uploads the whole fitted model. Its address becomes `runs:/<run_id>/model`.
+- `input_example` — three real rows saved alongside the model, documenting what input it expects.
+- `n_jobs=-1` — random forests train on all CPU cores.
+- `skops_trusted_types` — see Step 6; this line is the fix for a real crash.
+
+---
+
+### Step 5 — Test Without Touching the Real Server
+
+Unit tests must never write junk runs to your real server. So `tests/conftest.py` gets a `local_mlflow` fixture: a **throwaway MLflow database inside a temporary folder** that pytest deletes afterwards.
+
+```python
+@pytest.fixture
+def local_mlflow(tmp_path, monkeypatch):
+    """A throwaway sqlite tracking store + registry, so unit tests never touch the real server."""
+    previous_uri = mlflow.get_tracking_uri()
+    uri = f"sqlite:///{tmp_path / 'mlflow.db'}"
+    monkeypatch.setenv("MLFLOW_TRACKING_URI", uri)
+    mlflow.set_tracking_uri(uri)
+    experiment_id = mlflow.create_experiment(
+        "test-experiment", artifact_location=(tmp_path / "artifacts").as_uri()
+    )
+    mlflow.set_experiment(experiment_id=experiment_id)
+    yield uri
+    mlflow.set_tracking_uri(previous_uri)
+```
+
+Tests (training on the 2,000-row sample, so they're fast):
+
+| Test | What it proves |
+|---|---|
+| `test_configs_match_the_spec` | Exactly the 5 run names from the spec, in order |
+| `test_train_and_log_records_params_metrics_and_model` | A run gets the right name, params, metrics — and its model loads back and predicts positive prices |
+| `test_every_config_can_be_logged_and_loaded_back` (×5) | **Every** config — not just LinearRegression — survives a save → load round trip |
+
+The last one was added *after* a real failure — which is the next step.
+
+---
+
+### Step 6 — The Crash: `UntrustedTypesFoundException` (and How We Debugged It)
+
+The first real run died on the second model:
+
+```
+linreg_baseline  rmse=  83.54  mae= 47.08  r2=0.395
+Traceback (most recent call last):
+  ...
+skops.io.exceptions.UntrustedTypesFoundException: Untrusted types found in the file: ['sklearn.tree._tree.Tree'].
+mlflow.exceptions.MlflowException: The saved sklearn model references untrusted types.
+```
+
+**Root cause (found by reading MLflow's own source code, not by guessing):**
+
+1. MLflow 3 saves scikit-learn models in the **skops** format by default. skops is a safer replacement for Python's `pickle` — a pickle file can run *any* code when loaded, so a malicious model file could take over your machine.
+2. skops only loads object types on an **allow-list**. LinearRegression uses only allowed types. Random forests and gradient boosting store their trees in `sklearn.tree._tree.Tree`, which skops blocks by default (a crafted Tree could crash the process).
+3. You can explicitly trust a type with `skops_trusted_types`. MLflow writes that list into the model's metadata (`MLmodel` file), and `mlflow.sklearn.load_model` reads it back automatically — so the fix belongs only at logging time. The API (Task 6) needs no change.
+
+**Why didn't the tests catch it?** The original test only trained `linreg_baseline` — the one model without trees. Lesson: test *every* variant you'll actually use.
+
+**Fix, test-first:**
+1. Wrote `test_every_config_can_be_logged_and_loaded_back`, parametrized over all 5 configs → it reproduced the crash exactly: `4 failed, 1 passed` (every tree model failed, only `sklearn.tree._tree.Tree` flagged).
+2. Trusted exactly that one type — nothing more:
+   ```python
+   SKOPS_TRUSTED_TYPES = ["sklearn.tree._tree.Tree"]
+   ```
+3. Re-ran → `7 passed`; full suite `33 passed`.
+
+> ⚠️ **Trust only what you need.** The error message itself warns against trusting everything it reports "just to make a file load". We trust one type because we create these model files ourselves. Anything else unexpected would still be blocked.
+
+> ⚠️ **Don't let a filter hide a crash.** The first run was piped through `grep`, which made the whole command report **exit code 0** even though Python crashed. Always check the real exit code of the program itself.
+
+**Cleanup:** the crashed attempt left 2 runs on the server (a finished `linreg_baseline`, a `FAILED` `rf_100`). We soft-deleted both with `MlflowClient().delete_run(...)`, so the experiment shows exactly one clean set of five. (MLflow deletes are "soft" — runs move to a *Deleted* view and can be restored.)
+
+---
+
+### Step 7 — Run All Five Experiments
+
+```bash
+export MLFLOW_TRACKING_URI=http://127.0.0.1:5001
+python track_experiments.py
+```
+
+Output (42 seconds):
+```
+linreg_baseline  rmse=  83.54  mae= 47.08  r2=0.395  run_id=3bc55499dfb64305a25185b1cd40ffc9
+rf_100           rmse=  77.53  mae= 43.39  r2=0.479  run_id=d22d7f884d214953990e2cd4a3dceeaa
+rf_300_depth10   rmse=  78.75  mae= 43.81  r2=0.463  run_id=23d6c14c4baf4fb1aa960a7fdcdc1fad
+gb_100_lr01      rmse=  81.13  mae= 44.90  r2=0.430  run_id=22cd207e8654415cb2372bed6c144323
+gb_200_lr005     rmse=  81.21  mae= 44.92  r2=0.429  run_id=8a766f1b85a241c18e357bdc6e258b83
+```
+
+Then open **http://127.0.0.1:5001** → experiment `airbnb-price-prediction`. Tick the runs and click **Compare** to see them side by side.
+
+---
+
+### Step 8 — Reading the Results
+
+| Run | RMSE | MAE | R² | Saved model size |
+|---|---|---|---|---|
+| **rf_100** | **$77.53** | **$43.39** | **0.479** | **311 MB** |
+| rf_300_depth10 | $78.75 | $43.81 | 0.463 | 38 MB |
+| gb_100_lr01 | $81.13 | $44.90 | 0.430 | 3.7 MB |
+| gb_200_lr005 | $81.21 | $44.92 | 0.429 | 7.1 MB |
+| linreg_baseline | $83.54 | $47.08 | 0.395 | 0.3 MB |
+
+**What this tells us:**
+- **All four tree models beat the baseline** — they capture patterns a straight line can't (e.g. location effects that aren't linear in latitude/longitude).
+- **RMSE and MAE agree on the ranking** here, so there's no metric conflict to resolve (with regression they don't always agree — Task 8 decides the rule).
+- **The two gradient-boosting runs are nearly identical**: half the learning rate with double the trees lands in the same place.
+- **The gains are real but modest** (RMSE $83.5 → $77.5). The features only describe location, room type and booking activity — no size, bedrooms or amenities — so no model can explain most of the price.
+- **Size matters too.** `rf_100` grows 100 trees with **no depth limit**, so each tree is huge: 311 MB. `rf_300_depth10` is only $1.22 worse on RMSE but 8× smaller. The API downloads the champion at startup and keeps it in memory, so this trade-off is decided explicitly in Task 8.
+
+Verified directly on the server (not just from the printout): 5 active runs, all `FINISHED`, params and metrics present, and every model downloads through the server and loads as a `TransformedTargetRegressor`.
+
+> 💡 **Harmless warnings you'll see:** `Inferred schema contains integer column(s)...` (MLflow noting that integer columns can't hold missing values — fine, the API schema requires them) and `Failed to resolve installed pip version` (uv-made venvs don't include `pip`; MLflow just records it without a version).
+
+---
+
+### Step 9 — Commit
+
+```bash
+git add registry.py track_experiments.py tests/conftest.py tests/test_track_experiments.py
+git commit -m "feat: MLflow experiment tracking for five regression configs"
+# after the crash:
+git commit -m "fix: trust sklearn Tree type so tree models can be logged with MLflow's skops format"
+```
+
+`mlflow.db` and `mlartifacts/` are **not** committed — they're in `.gitignore`. They're the server's data, not source code.
+
+---
+
+### What You Should Have at the End of Task 7
+
+```
+NYC-Airbnb-Price-Prediction/
+├── registry.py                  ← MLflow names + require_tracking_uri
+├── track_experiments.py         ← CONFIGS + train_and_log
+├── mlflow.db                    ← server's run database, NOT in Git
+├── mlartifacts/                 ← saved models (~360 MB), NOT in Git
+├── tests/
+│   ├── conftest.py              ← + local_mlflow fixture
+│   └── test_track_experiments.py ← 7 tests
+└── ... (Task 1–6 files)
+```
+
+**Running:** MLflow server on http://127.0.0.1:5001 (its own terminal)
+**Tests:** 33 passed
+**Commits:**
+```
+32b81d2 fix: trust sklearn Tree type so tree models can be logged with MLflow's skops format
+fd15d54 feat: MLflow experiment tracking for five regression configs
+```
+
+---
+
+---
+
+# TASK 8 — MLflow Model Registry: Promote the Champion
+
+*Written when Task 8 is built.*
+
+**Preview:** choose the best run, register it as `AirbnbPriceModel`, and point the `@champion` alias at it. Then load it from a completely separate process, and serve real predictions through the API. First decision: `rf_100` (best RMSE, 311 MB) vs `rf_300_depth10` ($1.22 worse, 38 MB).

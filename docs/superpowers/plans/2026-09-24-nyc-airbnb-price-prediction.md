@@ -1009,6 +1009,14 @@ CONFIGS = {
 }
 
 
+# MLflow 3 saves sklearn models with skops, which only loads allow-listed
+# types. The tree ensembles store their trees in sklearn's Tree object, which
+# skops blocks unless trusted. We trust exactly that one type, since we create
+# these files ourselves; the list is saved in the MLmodel file and reused by
+# mlflow.sklearn.load_model, so the API needs no extra setting.
+SKOPS_TRUSTED_TYPES = ["sklearn.tree._tree.Tree"]
+
+
 def train_and_log(run_name, X_train, X_test, y_train, y_test):
     """Fit one config inside an MLflow run. Returns (run_id, metrics)."""
     model_class, params = CONFIGS[run_name]
@@ -1019,7 +1027,12 @@ def train_and_log(run_name, X_train, X_test, y_train, y_test):
             {"model_type": model_class.__name__, "target_transform": "log1p/expm1", **params}
         )
         mlflow.log_metrics(metrics)
-        mlflow.sklearn.log_model(model, name="model", input_example=X_train.head(3))
+        mlflow.sklearn.log_model(
+            model,
+            name="model",
+            input_example=X_train.head(3),
+            skops_trusted_types=SKOPS_TRUSTED_TYPES,
+        )
     return run.info.run_id, metrics
 
 
