@@ -20,8 +20,8 @@
 | **8** | MLflow Registry | Best model promoted to `@champion` | ✅ Done |
 | **9** | Docker | Slim API image that loads the champion at startup | ✅ Done |
 | **10** | Prefect | Automated, scheduled retraining flow | ✅ Done |
-| **11** | GitHub Actions | CI — tests on every pull request | ⏳ Next |
-| **12** | GitHub Actions, Docker Hub | CD — push the image when a new model is promoted | ⬜ |
+| **11** | GitHub Actions | CI — tests on every pull request | ✅ Done |
+| **12** | GitHub Actions, Docker Hub | CD — push the image when a new model is promoted | ⏳ Next |
 | **13** | Docker Compose | MLflow + API running together (optional) | ⬜ |
 | **14** | — | Definition-of-done check + README | ⬜ |
 
@@ -2552,6 +2552,250 @@ NYC-Airbnb-Price-Prediction/
 
 # TASK 11 — GitHub Actions CI
 
-*Written when Task 11 is built.*
+---
 
-**Preview:** create a GitHub repository and push the project. A CI workflow will run on every pull request. It starts a throwaway MLflow server, trains a quick baseline on the 2,000-row sample and promotes it to `@champion`, runs all tests (including the real-registry ones), then builds the Docker image. Needs a GitHub account and repo.
+### What Problem This Solves
+
+Our 45 tests only protect us if someone runs them. People forget, or run them with a server they've tweaked by hand. **Continuous Integration (CI)** runs the tests *automatically* on a clean machine for every proposed change, and shows a ✅ or ❌ on the pull request before anything is merged.
+
+**GitHub Actions** is GitHub's built-in CI. A YAML file in `.github/workflows/` says *when* to run (a pull request is opened or updated) and *what* to run.
+
+```mermaid
+flowchart LR
+    PR["Pull request\nopened / updated"] --> T
+    subgraph gha ["GitHub Actions (fresh Ubuntu machine)"]
+        T["job: test\n1. pip install\n2. start throwaway MLflow\n3. seed @champion from sample\n4. pytest"]
+        B["job: build-image\ndocker build (no push)"]
+        T -- "needs: test" --> B
+    end
+    B --> S["✅ / ❌ status checks\non the PR"]
+```
+
+**The CI puzzle:** our tests include real-registry tests that need an MLflow server with a `@champion`, and training needs data. But the runner is a brand-new machine: no MLflow server, and no access to the DVC remote on this laptop. The workflow therefore builds everything it needs from scratch, every time:
+- a **throwaway MLflow server**, started inside the job;
+- a **quick champion**, trained on the committed 2,000-row sample (Task 3) by `scripts/ci_seed_model.py`.
+
+---
+
+### Step 1 — `scripts/ci_seed_model.py`
+
+```python
+def main():
+    require_tracking_uri()
+    mlflow.set_experiment(EXPERIMENT_NAME)
+    run_id, metrics = train_and_log("linreg_baseline", *split_data(clean_data(load_data())))
+    version = register_and_promote(run_id)
+    print(f"seeded AirbnbPriceModel v{version} @champion (rmse={metrics['rmse']:.2f})")
+```
+
+It reuses the exact same `train_and_log` and `register_and_promote` as the real pipeline — no CI-only shortcuts. `load_data()` reads `$DATA_PATH`, which CI points at the sample. It uses LinearRegression because it's the fastest to train; CI checks that the *plumbing* works, not which model is best.
+
+Run it as a module from the project root: `python -m scripts.ci_seed_model` (see the `-m` note in Task 3).
+
+---
+
+### Step 2 — `.github/workflows/ci.yml`
+
+```yaml
+name: CI
+
+on:
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    env:
+      MLFLOW_TRACKING_URI: http://127.0.0.1:5000
+      # The DVC remote lives on a laptop; CI trains on the committed sample.
+      DATA_PATH: tests/fixtures/listings_sample.csv
+      MLFLOW_DISABLE_AGENT_HINT: "1"
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.11"
+          cache: pip
+      - run: pip install -r requirements.txt
+      - name: Start ephemeral MLflow server
+        run: |
+          mlflow server --backend-store-uri sqlite:///mlflow.db \
+            --artifacts-destination ./mlartifacts \
+            --host 127.0.0.1 --port 5000 > mlflow.log 2>&1 &
+          for i in $(seq 1 60); do
+            curl -sf http://127.0.0.1:5000/health && exit 0
+            sleep 2
+          done
+          cat mlflow.log
+          exit 1
+      - name: Seed AirbnbPriceModel@champion
+        run: python -m scripts.ci_seed_model
+      - run: pytest -v
+
+  build-image:
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: docker/setup-buildx-action@v4
+      - uses: docker/build-push-action@v7
+        with:
+          context: .
+          push: false
+          tags: airbnb-price-api:ci
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+```
+
+**Reading it:**
+
+| Part | Meaning |
+|---|---|
+| `on: pull_request` | Run whenever a PR is opened or gets new commits. A plain push to `main` runs nothing |
+| `runs-on: ubuntu-latest` | A fresh Linux virtual machine, thrown away afterwards |
+| `env:` (job level) | Environment variables for every step. Port **5000** is fine here: no AirPlay on GitHub's Linux machines |
+| `actions/checkout` | Downloads the repo's code into the machine |
+| `setup-python` + `cache: pip` | Installs Python 3.11 and caches downloaded packages between runs, keyed on `requirements.txt` |
+| `mlflow server ... &` | `&` runs the server in the background so the job can continue |
+| The `for` loop | **Waits until the server is actually ready** (polling `/health`) instead of guessing with `sleep 30`. If it never comes up, it prints the server log and fails the job, so the error message is useful |
+| `needs: test` | `build-image` only starts if `test` passed; no point building an image from broken code |
+| `push: false` | Build the image to prove the `Dockerfile` works, but don't publish it. Publishing unreviewed PR code would be risky; that's Task 12's controlled job |
+| `cache-from/to: type=gha` | Stores Docker layers in GitHub's cache so later builds reuse them |
+
+> 💡 **Use current action versions.** Our original plan listed `checkout@v4`, `setup-python@v5` and so on. Before writing the file we checked each action's latest major version (`git ls-remote --tags https://github.com/actions/checkout.git`) and found newer ones: `checkout@v7`, `setup-python@v7`, `setup-buildx-action@v4`, `build-push-action@v7`. Old versions eventually stop working when GitHub retires the runtime they depend on.
+
+---
+
+### Step 3 — Rehearse CI Locally First
+
+Pushing and waiting minutes to discover a typo is slow. We ran the same steps on the laptop against a throwaway server in a temporary folder (port 5055, so the real MLflow on 5001 is untouched):
+
+```bash
+T=$(mktemp -d)
+(cd "$T" && exec mlflow server --backend-store-uri sqlite:///mlflow.db \
+   --artifacts-destination ./mlartifacts --host 127.0.0.1 --port 5055 > mlflow.log 2>&1) &
+until curl -sf http://127.0.0.1:5055/health >/dev/null; do sleep 2; done
+
+export MLFLOW_TRACKING_URI=http://127.0.0.1:5055 DATA_PATH=tests/fixtures/listings_sample.csv
+python -m scripts.ci_seed_model
+pytest -q
+
+pkill -f "mlflow server.*--port 5055"; rm -rf "$T"
+```
+```
+seeded AirbnbPriceModel v1 @champion (rmse=93.98)
+45 passed
+```
+
+**45 passed, none skipped**, so the real-registry tests ran against the seeded champion. The sample-trained model's RMSE ($93.98) is worse than the full-data one ($83.54), as expected: less data. That's fine, because it only needs to pass the "Manhattan costs more than the Bronx" and "$10–$800" sanity checks.
+
+> 💡 **The parentheses matter.** `(cd "$T" && exec mlflow server ...) &` runs the `cd` inside a background subshell, so your own terminal stays in the project folder. Without them, a later `cd -` would jump somewhere unexpected; we caught exactly this bug in the plan during the Task 3 audit.
+
+---
+
+### Step 4 — Before Going Public: Review What You're Publishing
+
+The repository is **public**, so before the first push we checked exactly what would be uploaded:
+
+| Check | Result |
+|---|---|
+| Tracked files | 37, all code, config and docs |
+| Dataset | Not included; only the `.dvc` pointer file (DVC's job) |
+| Largest file | `tests/fixtures/listings_sample.csv`, 142 KB, model columns only (no names or IDs) |
+| Secrets / tokens | None found |
+| **Commit author email** | ⚠️ `kumarshikhar597@gmail.com` on every commit, which GitHub shows publicly |
+| Local paths | `/Users/kumarshikhar/...` in 7 places (low risk) |
+
+**Fixing the email *before* the first push.** GitHub gives every account a private "noreply" address: `<account-id>+<username>@users.noreply.github.com`. The account ID is public (`https://api.github.com/users/<username>` → `id`):
+
+```bash
+# 1. Use the noreply address for THIS repository only (other projects unaffected)
+git config user.email "44173053+shikharkumar13@users.noreply.github.com"
+
+# 2. Rewrite the author/committer email on all existing local commits
+FILTER_BRANCH_SQUELCH_WARNING=1 git filter-branch -f --env-filter \
+  "export GIT_AUTHOR_EMAIL='44173053+shikharkumar13@users.noreply.github.com' \
+          GIT_COMMITTER_EMAIL='44173053+shikharkumar13@users.noreply.github.com'" -- --all
+
+# 3. Remove filter-branch's local backup of the old commits
+git update-ref -d refs/original/refs/heads/main
+git reflog expire --expire=now --all && git gc -q --prune=now
+```
+
+We checked afterwards:
+- **file contents identical** before and after (same Git tree), so only author details changed;
+- **0** Gmail references left in the history.
+
+> ⚠️ **Rewriting history is only safe before you push.** It gives every commit a new ID (hash). Nobody had a copy yet, so this was harmless. After pushing, rewriting would break everyone else's copy, and the old commits would already be public. It also changed the commit hashes quoted in this guide, so those were updated too.
+
+---
+
+### Step 5 — Connect and Push
+
+```bash
+git remote add origin https://github.com/shikharkumar13/-NYC-Airbnb-Price-Prediction-MLOps.git
+git push --dry-run -u origin main   # checks your login without uploading anything
+git push -u origin main
+```
+```
+ * [new branch]      main -> main
+branch 'main' set up to track 'origin/main'.
+```
+
+**What these do:**
+- `remote add origin` stores the GitHub address under the short name `origin`.
+- `--dry-run` goes through authentication and shows what *would* happen. On this Mac, Homebrew's git uses the macOS Keychain (`credential.helper = osxkeychain`), which already held a GitHub login.
+- `-u` links local `main` to `origin/main`, so later a plain `git push` / `git pull` knows where to go.
+
+---
+
+### Step 6 — Definition of Done: A Real Pull Request
+
+CI only runs on pull requests, so we made a small but useful change on a new branch (README sections explaining the tests and CI) and pushed it:
+
+```bash
+git switch -c ci-smoke-test
+# ... edit README.md ...
+git commit -am "docs: README sections for tests and CI"
+git push -u origin ci-smoke-test
+```
+
+Then on GitHub: **Compare & pull request → Create pull request** → PR #1.
+
+Result, watched live through GitHub's API:
+
+| Job | Result | Time | Slowest steps |
+|---|---|---|---|
+| **test** | ✅ success | 2 m 31 s | `pip install` 55 s · `pytest -v` 58 s · MLflow start 12 s · seed 12 s |
+| **build-image** | ✅ success | 1 m 16 s | `docker build` 58 s |
+
+Every step of `test` succeeded: MLflow server started → `@champion` seeded → `pytest -v` passed. The PR page shows both checks green.
+
+> 💡 **See the logs yourself:** on the PR, click **Details** next to a check → the **test** job → the **Run pytest -v** step. You'll find `tests/test_model_registry.py ... PASSED`, which proves the registry tests really ran in CI (they only skip when `MLFLOW_TRACKING_URI` is unset, and CI sets it). GitHub only shows job logs to signed-in users.
+
+---
+
+### What You Should Have at the End of Task 11
+
+```
+NYC-Airbnb-Price-Prediction/
+├── .github/workflows/
+│   └── ci.yml                  ← test + build-image on every PR
+├── scripts/
+│   └── ci_seed_model.py        ← CI-only: train on sample, promote @champion
+└── ... (Task 1–10 files)
+```
+
+**GitHub:** https://github.com/shikharkumar13/-NYC-Airbnb-Price-Prediction-MLOps
+**Commit identity (this repo):** `44173053+shikharkumar13@users.noreply.github.com`
+**PR #1:** `ci-smoke-test` → `main`, both checks ✅
+
+---
+
+---
+
+# TASK 12 — Continuous Deployment: Publish the Image to Docker Hub
+
+*Written when Task 12 is built.*
+
+**Preview:** a `deploy.yml` workflow that builds the API image and **pushes** it to Docker Hub. It runs only when triggered, either by hand or by the Prefect flow after it promotes a new champion. It needs a Docker Hub account and access token (stored as GitHub secrets), plus a GitHub token that lets the flow trigger workflows.
