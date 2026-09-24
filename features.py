@@ -32,7 +32,7 @@ NUMERIC_FEATURES = [
 CATEGORICAL_FEATURES = ["neighbourhood_group", "neighbourhood", "room_type"]
 FEATURES = NUMERIC_FEATURES + CATEGORICAL_FEATURES
 
-# Cleaning thresholds (spec §2 / Phase 3):
+# Cleaning thresholds (see implementation.md, Tasks 2–3):
 # - price == 0: 11 rows in the 2019 file, data errors rather than free listings.
 # - price > 800: ~the 99th percentile ($799); 420 extreme outliers up to $10,000.
 MAX_PRICE = 800
