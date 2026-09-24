@@ -1,5 +1,5 @@
 fastapi==0.141.1
-httpx==0.28.1
+httpx2==2.13.1
 joblib==1.6.0
 mlflow==3.16.1
 numpy==2.4.6

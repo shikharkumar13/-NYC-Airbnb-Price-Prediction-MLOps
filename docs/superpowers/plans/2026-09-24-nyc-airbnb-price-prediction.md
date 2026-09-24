@@ -103,8 +103,8 @@ python --version   # Expected: Python 3.11.x
 - [ ] **Step 3: Install unpinned deps, then pin to what was actually installed**
 
 ```bash
-uv pip install scikit-learn pandas numpy joblib fastapi uvicorn pydantic mlflow prefect pytest requests httpx
-uv pip freeze | grep -iE '^(scikit-learn|pandas|numpy|joblib|fastapi|uvicorn|pydantic|mlflow|prefect|pytest|requests|httpx)==' > requirements.txt
+uv pip install scikit-learn pandas numpy joblib fastapi uvicorn pydantic mlflow prefect pytest requests httpx2
+uv pip freeze | grep -iE '^(scikit-learn|pandas|numpy|joblib|fastapi|uvicorn|pydantic|mlflow|prefect|pytest|requests|httpx2)==' > requirements.txt
 cat requirements.txt
 ```
 Expected: exactly 12 pinned lines (resolved on 2026-09-24 as e.g. `mlflow==3.16.1`, `scikit-learn==1.9.1`, `pandas==3.0.6`, `prefect==3.8.6`, `fastapi==0.141.1` — use whatever your freeze prints).
@@ -800,6 +800,7 @@ The model is loaded once at startup from the MLflow registry. mlflow reads
 MLFLOW_TRACKING_URI from the environment, so the same image works against a
 laptop server, CI, or the Compose `mlflow-server` service.
 """
+import logging
 import os
 from contextlib import asynccontextmanager
 
@@ -810,6 +811,7 @@ from fastapi import FastAPI
 from schemas import Listing, PricePrediction
 
 MODEL_URI = os.environ.get("MODEL_URI", "models:/AirbnbPriceModel@champion")
+logger = logging.getLogger("uvicorn.error")
 
 
 def load_model():
@@ -818,7 +820,12 @@ def load_model():
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    # If the MLflow server is unreachable, mlflow retries with backoff before
+    # failing (~4 min with its defaults; the Dockerfile shortens this), so say
+    # what we're waiting on instead of hanging silently.
+    logger.info("Loading %s from %s", MODEL_URI, mlflow.get_tracking_uri())
     app.state.model = load_model()
+    logger.info("Model loaded")
     yield
 
 
@@ -1321,6 +1328,14 @@ COPY schemas.py main.py ./
 # No model is baked in. main.py loads models:/AirbnbPriceModel@champion from
 # MLFLOW_TRACKING_URI at startup, so promoting a new champion only needs a
 # container restart. MLFLOW_TRACKING_URI must be supplied at `docker run`.
+#
+# Fail fast if MLflow is unreachable: mlflow's defaults (7 retries, backoff 2)
+# hang startup for ~4 minutes (measured in Task 6). 3 retries x 10 s timeout
+# still rides out a brief MLflow restart (~14 s of backoff) but then exits
+# with a clear error so Docker/Compose can restart the container.
+ENV MLFLOW_HTTP_REQUEST_MAX_RETRIES=3 \
+    MLFLOW_HTTP_REQUEST_TIMEOUT=10
+
 RUN useradd --create-home appuser
 USER appuser
 
@@ -1822,6 +1837,7 @@ services:
     environment:
       # The one env var every component reads.
       MLFLOW_TRACKING_URI: http://mlflow-server:5000
+      # (MLFLOW_HTTP_REQUEST_MAX_RETRIES / _TIMEOUT fail-fast values come from the Dockerfile.)
     ports:
       - "8000:8000"
     depends_on:
