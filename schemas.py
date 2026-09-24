@@ -8,7 +8,7 @@ from typing import Literal
 from pydantic import BaseModel, Field
 
 # NYC bounding box, padded slightly around the 2019 data's observed range
-# (lat 40.4998–40.9131, lon -74.2444 to -73.7130). A listing claiming to be
+# (lat 40.4998 to 40.9131, lon -74.2444 to -73.7130). A listing claiming to be
 # in Antarctica should never reach the model.
 NYC_LAT_MIN, NYC_LAT_MAX = 40.49, 40.92
 NYC_LON_MIN, NYC_LON_MAX = -74.26, -73.70

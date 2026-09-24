@@ -63,7 +63,7 @@ def render(match: re.Match) -> str:
     if not (REPO / path).is_file():
         sys.exit(f"build.py: {path} does not exist (update the marker)")
     verb = "Append to" if opts.get("title") == "append" else "File"
-    return f"📄 **{verb}: `{path}`**\n\n```{lang_for(path)}\n{slice_file(path, opts)}\n```"
+    return f"**{verb}: `{path}`**\n\n```{lang_for(path)}\n{slice_file(path, opts)}\n```"
 
 
 def build_body() -> str:

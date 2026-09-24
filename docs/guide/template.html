@@ -30,8 +30,8 @@
   --out-bg: #eceff4;
   --out-ink: #263141;
   --tip-bg: #e7eefb;   --tip-line: #b9caee;
-  --warn-bg: #fdf3e1;  --warn-line: #efcf97;
-  --win-bg: #e6f3f1;   --win-line: #a9d6cf;
+  --warn-bg: #fdf3e1;  --warn-line: #efcf97;  --warn-ink: #8a5300;
+  --win-bg: #e6f3f1;   --win-line: #a9d6cf;   --win-ink: #0d6b63;
   --ok-bg: #e7f5ec;    --ok-line: #9fd3b3;   --ok: #1d7a4a;
   --ex-bg: #fbf0f5;    --ex-line: #eab8cf;   --ex: #a8336a;
   --shadow: 0 1px 2px rgba(19, 24, 33, .06), 0 8px 24px rgba(19, 24, 33, .06);
@@ -60,8 +60,8 @@
     --out-bg: #111822;
     --out-ink: #c7d0dc;
     --tip-bg: #141f33;   --tip-line: #2a3d63;
-    --warn-bg: #251d10;  --warn-line: #5a4418;
-    --win-bg: #0f2322;   --win-line: #22504b;
+    --warn-bg: #251d10;  --warn-line: #5a4418;  --warn-ink: #f0b95a;
+    --win-bg: #0f2322;   --win-line: #22504b;   --win-ink: #5fd0c4;
     --ok-bg: #102419;    --ok-line: #25553a;   --ok: #5cc98e;
     --ex-bg: #25131d;    --ex-line: #5a2a42;   --ex: #eb86b4;
     --shadow: 0 1px 2px rgba(0, 0, 0, .4), 0 8px 24px rgba(0, 0, 0, .3);
@@ -86,8 +86,8 @@
   --out-bg: #111822;
   --out-ink: #c7d0dc;
   --tip-bg: #141f33;   --tip-line: #2a3d63;
-  --warn-bg: #251d10;  --warn-line: #5a4418;
-  --win-bg: #0f2322;   --win-line: #22504b;
+  --warn-bg: #251d10;  --warn-line: #5a4418;  --warn-ink: #f0b95a;
+  --win-bg: #0f2322;   --win-line: #22504b;   --win-ink: #5fd0c4;
   --ok-bg: #102419;    --ok-line: #25553a;   --ok: #5cc98e;
   --ex-bg: #25131d;    --ex-line: #5a2a42;   --ex: #eb86b4;
   --shadow: 0 1px 2px rgba(0, 0, 0, .4), 0 8px 24px rgba(0, 0, 0, .3);
@@ -285,15 +285,20 @@ article h4 { font: 700 1rem var(--display); margin: 28px 0 8px; }
 
 /* callouts */
 .callout {
-  display: grid; grid-template-columns: 1.7em minmax(0, 1fr); gap: 4px; align-items: start;
-  padding: 12px 16px; margin: 16px 0 18px; border-radius: 8px; border: 1px solid; max-width: none;
+  display: block; padding: 12px 16px 13px; margin: 16px 0 18px; border-radius: 8px; border: 1px solid;
   font-size: .95rem; line-height: 1.6;
 }
-.callout .mark { line-height: 1.55; }
+.callout-label {
+  display: block; margin-bottom: 3px; font: 700 .66rem/1.4 var(--display); letter-spacing: .13em; text-transform: uppercase;
+}
+.callout-body > :last-child { margin-bottom: 0; }
+.callout-body p { max-width: none; }
 .callout.tip { background: var(--tip-bg); border-color: var(--tip-line); }
+.callout.tip .callout-label { color: var(--accent-ink); }
 .callout.warn { background: var(--warn-bg); border-color: var(--warn-line); }
-.callout.win { background: var(--win-bg); border-color: var(--win-line); }
-.callout.ok { background: var(--ok-bg); border-color: var(--ok-line); }
+.callout.warn .callout-label { color: var(--warn-ink); }
+.callout.note { background: var(--win-bg); border-color: var(--win-line); }
+.callout.note .callout-label { color: var(--win-ink); }
 
 /* exercise + checkpoint boxes */
 .box { margin: 36px 0 24px; padding: 2px 22px 10px; border-radius: 12px; border: 1px solid; }
@@ -491,14 +496,14 @@ noscript p { padding: 40px 0; }
   article.innerHTML = marked.parse(source, { gfm: true });
 
   // ---------- 2. headings: ids, eyebrows, anchors ----------
-  var TITLE_SPLIT = /^(PART \d+|Chapter \d+|Appendix [A-Z])\s+—\s+(.*)$/;
+  var TITLE_SPLIT = /^(Part \d+|Chapter \d+|Appendix [A-Z]):\s+(.*)$/;
   Array.prototype.forEach.call(article.querySelectorAll("h1, h2, h3"), function (h) {
     var text = h.textContent;
     h.id = slugify(text);
     h.setAttribute("data-title", text);
     var m = text.match(TITLE_SPLIT);
     if (m) {
-      var label = m[1].replace(/^PART/, "Part");
+      var label = m[1];
       h.setAttribute("data-label", label);
       h.setAttribute("data-short", m[2]);
       h.innerHTML = '<span class="eyebrow">' + escapeHtml(label) + "</span>" + escapeHtml(m[2]);
@@ -597,7 +602,7 @@ noscript p { padding: 40px 0; }
     var prev = pre.previousElementSibling;
     var prevText = textOf(prev);
     var kind, labelHtml = "";
-    if (prev && prev.tagName === "P" && /^📄/.test(prevText)) {
+    if (prev && prev.tagName === "P" && /^(File|Append to): /.test(prevText) && prev.querySelector("strong")) {
       kind = "file";
       var verb = /Append to/.test(prevText) ? "Append to" : "File";
       var path = prev.querySelector("code") ? prev.querySelector("code").textContent : prevText;
@@ -647,22 +652,34 @@ noscript p { padding: 40px 0; }
   });
 
   // ---------- 5. callouts, exercises, checkpoints ----------
-  var CALLOUTS = [["💡", "tip"], ["⚠️", "warn"], ["🪟", "win"], ["✅", "ok"]];
-  Array.prototype.forEach.call(article.querySelectorAll("section p"), function (p) {
-    var t = p.textContent.trim();
-    for (var i = 0; i < CALLOUTS.length; i++) {
-      var mark = CALLOUTS[i][0];
-      if (t.indexOf(mark) === 0) {
-        var html = p.innerHTML.trim().replace(new RegExp("^" + mark + "\\s*"), "");
-        p.className = "callout " + CALLOUTS[i][1];
-        p.innerHTML = '<span class="mark" aria-hidden="true">' + mark + "</span><span>" + html + "</span>";
-        return;
-      }
+  // Callouts are GitHub alert blockquotes: "> [!TIP]", "> [!WARNING]", "> [!NOTE]".
+  var ALERTS = { TIP: ["tip", "Tip"], WARNING: ["warn", "Warning"], NOTE: ["note", "Note"], IMPORTANT: ["warn", "Important"], CAUTION: ["warn", "Caution"] };
+  Array.prototype.forEach.call(article.querySelectorAll("blockquote"), function (bq) {
+    var first = bq.firstElementChild;
+    if (!first || first.tagName !== "P") return;
+    var m = first.innerHTML.match(/^\s*\[!(TIP|WARNING|NOTE|IMPORTANT|CAUTION)\]\s*/);
+    if (!m) return;
+    first.innerHTML = first.innerHTML.slice(m[0].length);
+    if (!first.innerHTML.trim()) first.remove();
+    var type = ALERTS[m[1]];
+    var label = type[1];
+    var lead = bq.querySelector("p > strong:first-child");
+    if (type[0] === "note" && lead && /^Windows:?$/.test(lead.textContent.trim())) {
+      label = "Windows";
+      var after = lead.nextSibling;
+      lead.remove();
+      if (after && after.nodeType === 3) after.textContent = after.textContent.replace(/^\s+/, "");
     }
+    var box = el("aside", "callout " + type[0]);
+    box.appendChild(el("span", "callout-label", escapeHtml(label)));
+    var body = el("div", "callout-body");
+    while (bq.firstChild) body.appendChild(bq.firstChild);
+    box.appendChild(body);
+    bq.replaceWith(box);
   });
   Array.prototype.forEach.call(article.querySelectorAll("section > h3"), function (h) {
     var t = h.getAttribute("data-title") || "";
-    var type = /^🧪/.test(t) ? "exercise" : /^✅/.test(t) ? "checkpoint" : null;
+    var type = /^See it fail:/.test(t) ? "exercise" : /^Checkpoint$/.test(t) ? "checkpoint" : null;
     if (!type) return;
     var box = el("div", "box " + type);
     h.parentNode.insertBefore(box, h);
@@ -673,7 +690,7 @@ noscript p { padding: 40px 0; }
       sib = next;
     }
     var anchor = h.querySelector(".anchor");
-    var rest = t.replace(/^(🧪|✅)\s*/, "").replace(/^See It Fail\s*—\s*/, "");
+    var rest = t.replace(/^See it fail:\s*/, "");
     h.innerHTML = '<span class="tag">' + (type === "exercise" ? "See it fail" : "Checkpoint") + "</span>" +
       (type === "exercise" ? escapeHtml(rest) : "Prove this chapter worked");
     if (anchor) h.appendChild(anchor);
@@ -718,7 +735,7 @@ noscript p { padding: 40px 0; }
     li.appendChild(a);
     var subs = el("ol", "subs");
     Array.prototype.forEach.call(block.querySelectorAll("h3"), function (h3) {
-      var sa = el("a", null, escapeHtml(h3.getAttribute("data-title").replace(/^(🧪|✅)\s*/, "")));
+      var sa = el("a", null, escapeHtml(h3.getAttribute("data-title")));
       sa.href = "#" + h3.id;
       var sli = el("li"); sli.appendChild(sa); subs.appendChild(sli);
     });
@@ -868,7 +885,7 @@ noscript p { padding: 40px 0; }
   var index = [];
   Array.prototype.forEach.call(article.querySelectorAll("h2, h3"), function (h) {
     var owner = chapters.filter(function (c) { return c.section.contains(h); })[0];
-    index.push({ id: h.id, text: (h.getAttribute("data-title") || "").replace(/^(🧪|✅)\s*/, ""),
+    index.push({ id: h.id, text: (h.getAttribute("data-title") || ""),
       where: owner && owner.h2 !== h ? (owner.h2.getAttribute("data-label") || owner.h2.getAttribute("data-title")) : "" });
   });
   Array.prototype.forEach.call(article.querySelectorAll(".kind-file .label b"), function (b) {
@@ -887,7 +904,7 @@ noscript p { padding: 40px 0; }
       return terms.every(function (t) { return hay.indexOf(t) !== -1; });
     }).slice(0, 25);
     results.innerHTML = "";
-    if (!hits.length) results.appendChild(el("li", "empty", "No heading or file matches “" + escapeHtml(search.value.trim()) + "”."));
+    if (!hits.length) results.appendChild(el("li", "empty", "No heading or file matches \"" + escapeHtml(search.value.trim()) + "\"."));
     hits.forEach(function (item, i) {
       var li = el("li");
       var a = el("a", i === 0 ? "active" : "", escapeHtml(item.text) + (item.where ? "<small>" + escapeHtml(item.where) + "</small>" : ""));
