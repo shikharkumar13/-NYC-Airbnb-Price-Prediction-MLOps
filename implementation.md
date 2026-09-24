@@ -17,8 +17,8 @@
 | **5** | Pydantic | Input/output schemas with validation | ✅ Done |
 | **6** | FastAPI | Prediction REST API | ✅ Done |
 | **7** | MLflow Tracking | Five logged experiments on an MLflow server | ✅ Done |
-| **8** | MLflow Registry | Best model promoted to `@champion` | ⏳ Next |
-| **9** | Docker | Slim API image that loads the champion at startup | ⬜ |
+| **8** | MLflow Registry | Best model promoted to `@champion` | ✅ Done |
+| **9** | Docker | Slim API image that loads the champion at startup | ⏳ Next |
 | **10** | Prefect | Automated, scheduled retraining flow | ⬜ |
 | **11** | GitHub Actions | CI — tests on every pull request | ⬜ |
 | **12** | GitHub Actions, Docker Hub | CD — push the image when a new model is promoted | ⬜ |
@@ -1707,6 +1707,259 @@ fd15d54 feat: MLflow experiment tracking for five regression configs
 
 # TASK 8 — MLflow Model Registry: Promote the Champion
 
-*Written when Task 8 is built.*
+---
 
-**Preview:** choose the best run, register it as `AirbnbPriceModel`, and point the `@champion` alias at it. Then load it from a completely separate process, and serve real predictions through the API. First decision: `rf_100` (best RMSE, 311 MB) vs `rf_300_depth10` ($1.22 worse, 38 MB).
+### What Problem This Solves
+
+Task 7 gave us five runs. Now: **which one is "the" model the API should serve — and how does the API find it?**
+
+The **Model Registry** is MLflow's catalogue of approved models:
+- A **registered model** is a named slot: `AirbnbPriceModel`.
+- Each time you register a run's model into it, it gets a new **version**: v1, v2, v3…
+- An **alias** is a movable label pointing at one version: `@champion` → v1.
+
+The API (Task 6) asks for `models:/AirbnbPriceModel@champion`. To ship a better model later, you register it as v2 and move `@champion` to it — the API code never changes.
+
+```mermaid
+flowchart LR
+    subgraph runs ["Experiment runs (Task 7)"]
+        A["linreg_baseline"]
+        B["rf_100"]
+        C["rf_300_depth10"]
+        D["gb_100_lr01"]
+        E["gb_200_lr005"]
+    end
+    subgraph reg ["Model Registry: AirbnbPriceModel"]
+        V1["v1"]
+    end
+    C -- "register" --> V1
+    AL["@champion"] -.-> V1
+    API["⚡ API\nmodels:/AirbnbPriceModel@champion"] --> AL
+```
+
+> 💡 **Aliases, not stages.** Older MLflow tutorials use "stages" (`Staging`, `Production`). That API is deprecated. Aliases do the same job with any name you like, and a version can have several.
+
+---
+
+### Step 1 — The Decision: Which Model Wins?
+
+The spec says: pick the lowest RMSE, but sanity-check it. The sanity check found a real problem:
+
+| Run | RMSE | Model size |
+|---|---|---|
+| rf_100 | **$77.53** | **326 MB** |
+| rf_300_depth10 | $78.75 | 39 MB |
+
+`rf_100` wins by $1.22, but its 100 unlimited-depth trees make it **8× bigger**. The API downloads the champion every time it starts and keeps it in memory; the Docker container (Task 9) and CI (Task 11) would pay that cost on every start. **We chose `rf_300_depth10`** — practically the same accuracy, far lighter.
+
+**But a one-off manual pick isn't enough.** In Task 10, Prefect will retrain and promote *automatically*. So the decision has to be a written, testable rule:
+
+> **Champion = the lowest RMSE among models no bigger than 100 MB.**
+
+---
+
+### Step 2 — Record Each Model's Size (`track_experiments.py`)
+
+To apply a size rule, every run needs its size as a metric. MLflow already writes each model's exact size into its metadata file (`MLmodel`); reading that tiny file doesn't download the model:
+
+```python
+model_info = mlflow.sklearn.log_model(...)
+size_bytes = Model.load(model_info.model_uri).model_size_bytes
+metrics["model_size_mb"] = round(size_bytes / 1e6, 1)
+mlflow.log_metric("model_size_mb", metrics["model_size_mb"])
+```
+
+The existing Task 7 runs didn't have this metric, so we soft-deleted them and re-ran `track_experiments.py`. Because every model uses `random_state=42`, the metrics came out **identical** — now with sizes:
+
+```
+linreg_baseline  rmse=  83.54  mae= 47.08  r2=0.395  size=   0.3MB
+rf_100           rmse=  77.53  mae= 43.39  r2=0.479  size= 326.0MB
+rf_300_depth10   rmse=  78.75  mae= 43.81  r2=0.463  size=  39.3MB
+gb_100_lr01      rmse=  81.13  mae= 44.90  r2=0.430  size=   3.9MB
+gb_200_lr005     rmse=  81.21  mae= 44.92  r2=0.429  size=   7.4MB
+```
+
+> 💡 **Why reproducibility pays off:** because the numbers matched exactly, re-running was safe — we changed *what we record*, not *what we train*.
+
+---
+
+### Step 3 — The Selection Rule (`registry.py`)
+
+```python
+SELECTION_METRIC = "rmse"
+MAX_MODEL_SIZE_MB = 100
+
+
+def pick_best(results: dict[str, dict[str, float]]) -> str:
+    """results maps run_id -> metrics (incl. model_size_mb). Returns the winning run_id."""
+    eligible = {
+        run_id: m for run_id, m in results.items() if m["model_size_mb"] <= MAX_MODEL_SIZE_MB
+    }
+    if not eligible:
+        raise ValueError(f"No model within the {MAX_MODEL_SIZE_MB} MB size budget")
+
+    best = min(eligible, key=lambda run_id: eligible[run_id][SELECTION_METRIC])
+    best_overall = min(results, key=lambda run_id: results[run_id][SELECTION_METRIC])
+    if best_overall != best:
+        print(f"note: {best_overall} has a lower RMSE but is over the {MAX_MODEL_SIZE_MB} MB budget")
+    best_by_mae = min(eligible, key=lambda run_id: eligible[run_id]["mae"])
+    if best_by_mae != best:
+        print(f"note: lowest-RMSE run {best} differs from lowest-MAE run {best_by_mae}; RMSE decides")
+    return best
+```
+
+**Why these choices:**
+- **RMSE decides** — it punishes big dollar misses hardest. For a pricing tool, one $300 miss hurts more than three $100 misses.
+- **MAE is still checked** — with regression, metrics can disagree. If they do, the script *says so* instead of silently picking.
+- **Excluded winners are announced** — you always see when the size budget changed the outcome.
+- **No eligible model → error**, not "promote nothing quietly" or "promote the oversized one anyway".
+
+`best_run_id(experiment_name)` feeds this from the server: it searches only `FINISHED` runs, and treats a run with no `model_size_mb` metric as infinitely big — it can't prove it fits the budget.
+
+---
+
+### Step 4 — Register and Promote
+
+```python
+def logged_model_uri(run_id: str) -> str:
+    """MLflow 3 stores a run's model as its own LoggedModel (models:/m-...), not as a run artifact."""
+    outputs = MlflowClient().get_run(run_id).outputs.model_outputs
+    if not outputs:
+        raise ValueError(f"Run {run_id} has no logged model")
+    return f"models:/{outputs[0].model_id}"
+
+
+def register_and_promote(run_id: str) -> str:
+    """Register the run's model and point @champion at it. Returns the new version."""
+    version = mlflow.register_model(logged_model_uri(run_id), MODEL_NAME).version
+    MlflowClient().set_registered_model_alias(MODEL_NAME, CHAMPION_ALIAS, version)
+    return version
+```
+
+Run it:
+```bash
+python registry.py
+```
+```
+Successfully registered model 'AirbnbPriceModel'.
+Created version '1' of model 'AirbnbPriceModel'.
+note: f0f529b7... has a lower RMSE but is over the 100 MB budget
+registered AirbnbPriceModel v1 from run 63832c72... -> @champion
+```
+
+Result: **`@champion` → v1 = `rf_300_depth10`** (RMSE $78.75, 39.3 MB). In the UI: **Models → AirbnbPriceModel** shows version 1 with the `champion` alias.
+
+> 💡 **Why `logged_model_uri` and not `runs:/<id>/model`?** Our first version registered `runs:/<run_id>/model` (the MLflow 2 style). It worked, but MLflow warned: *"Run … has no artifacts at artifact path 'model', registering model based on models:/m-… instead"*. In MLflow 3, a logged model is its own object with its own address (`models:/m-…`); the run just records which model it produced. Relying on a fallback is fragile, so we wrote a test that fails on that warning, then switched to registering the model's real address.
+
+---
+
+### Step 5 — Tests
+
+Unit tests (throwaway `local_mlflow` database — never your real server):
+
+| Test | What it proves |
+|---|---|
+| `test_pick_best_uses_lowest_rmse_within_size_budget` | A 326 MB model with the best RMSE is skipped; the 39 MB runner-up wins |
+| `test_pick_best_prefers_rmse_when_mae_disagrees` | RMSE is the deciding metric |
+| `test_pick_best_refuses_when_no_model_fits_the_budget` | Raises instead of promoting something oversized |
+| `test_register_and_promote_sets_champion_alias` | `@champion` points at the new version and loads |
+| `test_promoting_again_moves_the_alias` | A second promotion creates v2 and moves the alias |
+| `test_register_uses_the_runs_logged_model_not_a_fallback` | No fallback warning; the version's source is `models:/m-…` |
+
+**Real-registry tests** — `tests/test_model_registry.py` (spec Phase 9). These load the actual champion from your server through `models:/AirbnbPriceModel@champion` (not joblib) and check that predictions make economic sense:
+
+| Test | What it proves |
+|---|---|
+| `test_manhattan_entire_home_costs_more_than_bronx_shared_room` | Direction makes sense |
+| `test_predictions_are_plausible_dollar_amounts` (×2) | Prices are between $10 and $800 |
+
+Regression has no "0.5 threshold" to test against like classification did, so direction and plausibility are the sanity checks.
+
+They're **skipped** (with a clear reason) when `MLFLOW_TRACKING_URI` isn't set, so the rest of the suite still runs without a server:
+```bash
+MLFLOW_TRACKING_URI=http://127.0.0.1:5001 pytest tests/test_model_registry.py -v   # 3 passed
+env -u MLFLOW_TRACKING_URI pytest tests/test_model_registry.py -v -rs             # 3 skipped
+```
+
+**Safety check:** we counted experiments, runs and model versions on the server before and after running the full suite with the server configured — identical (`experiments=2 runs=12 model_versions=1`). Unit tests don't leak into your real server.
+
+---
+
+### Step 6 — Definition of Done: Load From a Separate Process, Then Serve
+
+The spec's Phase 7 test: a **brand-new Python process** — knowing nothing except the registry address — loads and predicts:
+
+```bash
+export MLFLOW_TRACKING_URI=http://127.0.0.1:5001
+python -c "
+import mlflow.sklearn, pandas as pd
+from schemas import EXAMPLE_LISTING
+m = mlflow.sklearn.load_model('models:/AirbnbPriceModel@champion')
+print(type(m).__name__, round(float(m.predict(pd.DataFrame([EXAMPLE_LISTING]))[0]), 2))"
+```
+```
+TransformedTargetRegressor 244.25
+```
+
+And through the real API:
+```bash
+uvicorn main:app --port 8000
+```
+```
+INFO:     Loading models:/AirbnbPriceModel@champion from http://127.0.0.1:5001
+INFO:     Model loaded
+INFO:     Application startup complete.
+```
+
+| Listing | `/predict` |
+|---|---|
+| Midtown (Manhattan) entire home | **$244.25** — same as the separate process ✅ |
+| Williamsburg (Brooklyn) entire home | $190.16 |
+| Midtown (Manhattan) private room | $129.44 |
+| Fordham (Bronx) shared room | $38.59 |
+
+Manhattan > Brooklyn, entire home > private room > shared room — sensible. ✅
+
+> 💡 **Try it yourself:** with the MLflow server running, in a terminal with the venv active:
+> ```bash
+> export MLFLOW_TRACKING_URI=http://127.0.0.1:5001
+> uvicorn main:app --port 8000
+> ```
+> Open http://127.0.0.1:8000/docs → **POST /predict → Try it out → Execute**. Change the `room_type` or `neighbourhood_group` and watch the price move. Stop with Ctrl-C.
+
+---
+
+### Step 7 — Commit
+
+```bash
+git add registry.py track_experiments.py tests/test_track_experiments.py tests/test_model_registry.py docs/
+git commit -m "feat: register best run as AirbnbPriceModel@champion with a 100 MB size budget"
+```
+
+---
+
+### What You Should Have at the End of Task 8
+
+```
+NYC-Airbnb-Price-Prediction/
+├── registry.py                   ← + size budget, pick_best, logged_model_uri, register_and_promote
+├── track_experiments.py          ← + model_size_mb metric
+├── tests/
+│   ├── test_track_experiments.py ← 13 tests
+│   └── test_model_registry.py    ← 3 tests against the real champion
+└── ... (Task 1–7 files)
+```
+
+**MLflow registry:** `AirbnbPriceModel` v1 = `rf_300_depth10`, alias `@champion`
+**Tests:** 42 passed with the server configured (39 passed + 3 skipped without it)
+**Commit:** `8d99955 feat: register best run as AirbnbPriceModel@champion with a 100 MB size budget`
+
+---
+
+---
+
+# TASK 9 — Docker Image for the API
+
+*Written when Task 9 is built.*
+
+**Preview:** package the API into a slim `python:3.11-slim` image that **doesn't contain the model**. At startup it downloads `@champion` from the MLflow server, reaching your laptop's server at `http://host.docker.internal:5001`. It also gets the fail-fast retry settings from Task 6. Needs Docker Desktop running.
