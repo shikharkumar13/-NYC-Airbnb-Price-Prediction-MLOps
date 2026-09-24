@@ -355,7 +355,9 @@ Unit tests use a throwaway registry. This file checks the actual champion on you
 ```bash
 pytest tests/test_model_registry.py -v                         # 3 passed
 env -u MLFLOW_TRACKING_URI pytest tests/test_model_registry.py -v -rs
-# SKIPPED [2] ...: MLFLOW_TRACKING_URI not set; start the MLflow server to run registry tests
+# SKIPPED [1] tests/test_model_registry.py:47: MLFLOW_TRACKING_URI not set; start the MLflow server to run registry tests
+# SKIPPED [2] tests/test_model_registry.py:51: MLFLOW_TRACKING_URI not set; start the MLflow server to run registry tests
+# 3 skipped
 ```
 
 ### Step 6 — Load the champion from a brand-new process

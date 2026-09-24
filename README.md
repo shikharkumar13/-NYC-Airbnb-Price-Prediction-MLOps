@@ -61,7 +61,7 @@ Trained on 38,771 listings and evaluated on 9,693 held-out listings. Errors are 
 ```bash
 uv venv --python 3.11 .venv
 source .venv/bin/activate          # in every new terminal
-uv pip install -r requirements.txt dvc
+uv pip install -r requirements.txt "dvc==3.67.1"
 dvc pull                           # fetches data/AB_NYC_2019.csv from the DVC remote
 ```
 

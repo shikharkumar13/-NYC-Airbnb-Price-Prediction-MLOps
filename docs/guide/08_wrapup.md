@@ -35,7 +35,7 @@ cd /tmp
 git clone https://github.com/<your-github-username>/<your-repo>.git airbnb-check
 cd airbnb-check
 uv venv --python 3.11 .venv && source .venv/bin/activate
-uv pip install -r requirements.txt dvc
+uv pip install -r requirements.txt "dvc==3.67.1"
 dvc pull
 python train.py | grep rmse
 env -u MLFLOW_TRACKING_URI pytest -q
@@ -202,9 +202,9 @@ Not in Git (and never should be): `.venv/`, `data/AB_NYC_2019.csv`, `models/`, `
 | Deploy trigger `401 Bad credentials` | Token missing/expired/incomplete in this terminal | Re-export `GITHUB_TOKEN` | 12 |
 | Deploy trigger `403 Resource not accessible by personal access token` | Token lacks **Actions: Read and write** | Edit the fine-grained token's permissions | 12 |
 | Deploy trigger `404 Not Found` | Token not granted this repo, or wrong `GITHUB_REPO` | Fix repository access / the `owner/repo` value | 12 |
+| `mlflow gc`: `Tracking URL is not set` / `the tracking URI must be a valid http or https URI` | `gc` needs a running server to delete proxied model files | Follow Appendix E: temporary server, `export MLFLOW_TRACKING_URI=http://127.0.0.1:5001` | E |
 | Scheduled runs never happen | The `--serve` process isn't running; deployment paused | Keep `python orchestrate_training.py --serve` running | 10 |
 | `cd -NYC-…: invalid option` | Name starts with `-` | `cd -- -NYC-…` | 14 |
-| GitHub API `rate limit exceeded` (scripts polling GitHub) | 60 requests/hour without logging in | Poll less often, or authenticate | 12 |
 
 ### "My personal email is in my commits"
 
@@ -282,29 +282,53 @@ If you've already pushed, the old commits are public; rewriting would break ever
 
 **Why disk grows:** every full retrain saves ~377 MB of models, mostly the 326 MB `rf_100` that the size rule never promotes. `du -sh mlartifacts` shows the total.
 
-**Free it** — delete runs you don't need (they go to MLflow's *Deleted* view), then permanently remove deleted runs and their files.
+**Free it.** Deleting a run only hides it, and in MLflow 3 each model is its own object (a *logged model*, `models:/m-…`) that outlives its run. So the recipe deletes both the old `rf_100` runs **and** their models, then runs `mlflow gc` to erase them for good, files included.
 
-⚠️ *This recipe wasn't exercised in the original project. Back up first (Chapter 13, Step 1), and stop the stack so nothing else is writing the database.*
+`mlflow gc` works on the database file directly, but it needs a **running** server to delete the model files (they're stored through the server's artifact proxy). Compose's MLflow can't be used for this: `gc` on your computer and the server in the container would both write `mlflow.db`, and SQLite locking isn't reliable across the container boundary. So stop the stack and use a temporary server on your computer, just for the cleanup:
+
+⚠️ *Back up first (Chapter 13, Step 1).*
 
 ```bash
 docker compose down
+(exec mlflow server --backend-store-uri sqlite:///mlflow.db --artifacts-destination ./mlartifacts \
+   --host 127.0.0.1 --port 5001 > mlflow.log 2>&1) &
+until curl -sf http://127.0.0.1:5001/health >/dev/null; do sleep 2; done
+export MLFLOW_TRACKING_URI=http://127.0.0.1:5001
+du -sh mlartifacts
+
 python - <<'EOF'
 import mlflow
 from mlflow import MlflowClient
-mlflow.set_tracking_uri("sqlite:///mlflow.db")      # talk to the database directly (server stopped)
 client = MlflowClient()
 champion_run = client.get_model_version_by_alias("AirbnbPriceModel", "champion").run_id
 runs = mlflow.search_runs(experiment_names=["airbnb-price-prediction"],
                           filter_string="tags.mlflow.runName = 'rf_100'")
+deleted = 0
 for run_id in runs["run_id"]:
-    if run_id != champion_run:
-        client.delete_run(run_id)
-print("deleted", len(runs), "rf_100 runs")
+    if run_id == champion_run:          # never delete what the API serves
+        continue
+    for output in client.get_run(run_id).outputs.model_outputs:
+        client.delete_logged_model(output.model_id)
+    client.delete_run(run_id)
+    deleted += 1
+print("deleted", deleted, "rf_100 runs and their models")
 EOF
-mlflow gc --backend-store-uri sqlite:///mlflow.db --artifacts-destination ./mlartifacts
+
+mlflow gc --backend-store-uri sqlite:///mlflow.db
 du -sh mlartifacts
+pkill -f "mlflow server.*--port 5001"
+while lsof -nP -iTCP:5001 -sTCP:LISTEN >/dev/null; do sleep 1; done   # wait until it has really stopped
 docker compose up -d
 ```
+Expected (IDs differ):
+```
+deleted 4 rf_100 runs and their models
+Run with ID … has been permanently deleted.
+Logged model with ID m-… has been permanently deleted.
+```
+…one line per run and per model (4 rounds of training so far: Chapters 7, 10 twice, and 12), and the second `du` is smaller by about 326 MB per deleted run. Empty `m-…` folders may remain in `mlartifacts/`; they take no space. Afterwards, the Chapter 8 Step 6 command still prints `TransformedTargetRegressor 244.25`: the champion is untouched.
+
+💡 This was tested on a throwaway copy of the setup (a scratch server with a few `rf_100` runs), not on the original project's data. That's why the backup comes first.
 
 **Revoke tokens you no longer need:** GitHub → Settings → Developer settings → Personal access tokens; Docker Hub → Account settings → Personal access tokens.
 

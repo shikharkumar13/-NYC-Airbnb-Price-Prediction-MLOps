@@ -161,7 +161,9 @@ docker compose ps
 ```
 Still `@champion`, still $244.25.
 
-💡 The MLflow container runs as root but writes into your project folder. Docker Desktop maps those files back to *your* user, so new runs' artifacts are ordinary files you own.
+💡 The MLflow container runs as root but writes into your project folder. On macOS, Docker Desktop maps those files back to *your* user, so new runs' artifacts are ordinary files you own.
+
+🪟 In WSL2 the files the container creates may be owned by `root` (check with `ls -l mlartifacts`). If a later host command such as Appendix E's cleanup reports `Permission denied`, give them back to yourself: `sudo chown -R "$USER" mlflow.db mlartifacts`.
 
 ### Step 6 — Everyday commands
 

@@ -94,7 +94,7 @@ Python 3.11.x
 Install them:
 ```bash
 uv pip install -r requirements.txt
-uv pip install dvc
+uv pip install "dvc==3.67.1"
 ```
 
 **What each library is for:**
@@ -118,7 +118,7 @@ You're using those exact pins, which is why your results will match this guide.
 
 💡 **Why `httpx2` and not `httpx`?** FastAPI's test client printed `StarletteDeprecationWarning: Using httpx with starlette.testclient is deprecated; install httpx2 instead`. A deprecation warning is a future error, so the project switched.
 
-💡 **Why is DVC not in `requirements.txt`?** It's a tool *you* use to fetch data. The automated CI machines (Chapter 11) never run it, so leaving it out keeps their installs smaller.
+💡 **Why is DVC not in `requirements.txt`?** It's a tool *you* use to fetch data. The automated CI machines (Chapter 11) never run it, so leaving it out keeps their installs smaller. It's still pinned (to the version this guide was tested with), so its messages match the ones shown in Chapter 2.
 
 ### Step 5 — `.gitignore`: what Git must never track
 
@@ -157,7 +157,7 @@ git commit -m "chore: project scaffold, pinned requirements, pytest config"
 ```bash
 git log --oneline          # 1 commit
 python -c "import sklearn, pandas, mlflow, prefect, fastapi; print('imports ok')"
-dvc --version              # 3.x
+dvc --version              # 3.67.1
 git config user.email      # your noreply address
 ```
 
