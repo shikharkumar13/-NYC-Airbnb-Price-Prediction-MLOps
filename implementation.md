@@ -18,8 +18,8 @@
 | **6** | FastAPI | Prediction REST API | ✅ Done |
 | **7** | MLflow Tracking | Five logged experiments on an MLflow server | ✅ Done |
 | **8** | MLflow Registry | Best model promoted to `@champion` | ✅ Done |
-| **9** | Docker | Slim API image that loads the champion at startup | ⏳ Next |
-| **10** | Prefect | Automated, scheduled retraining flow | ⬜ |
+| **9** | Docker | Slim API image that loads the champion at startup | ✅ Done |
+| **10** | Prefect | Automated, scheduled retraining flow | ⏳ Next |
 | **11** | GitHub Actions | CI — tests on every pull request | ⬜ |
 | **12** | GitHub Actions, Docker Hub | CD — push the image when a new model is promoted | ⬜ |
 | **13** | Docker Compose | MLflow + API running together (optional) | ⬜ |
@@ -1960,6 +1960,296 @@ NYC-Airbnb-Price-Prediction/
 
 # TASK 9 — Docker Image for the API
 
-*Written when Task 9 is built.*
+---
 
-**Preview:** package the API into a slim `python:3.11-slim` image that **doesn't contain the model**. At startup it downloads `@champion` from the MLflow server, reaching your laptop's server at `http://host.docker.internal:5001`. It also gets the fail-fast retry settings from Task 6. Needs Docker Desktop running.
+### What Problem This Solves
+
+The API works on this laptop because the laptop has Python 3.11, a `.venv` with exactly the right libraries, and our code. Another machine — a cloud server, a teammate's laptop, CI — has none of that. "It works on my machine" is the classic deployment failure.
+
+A **Docker image** is a sealed box containing an operating system, Python, the exact libraries and our code. Any machine with Docker runs it identically. A running copy of an image is a **container**.
+
+```mermaid
+flowchart LR
+    subgraph laptop ["Your Mac"]
+        subgraph container ["🐳 Container: airbnb-price-api"]
+            API["uvicorn main:app\n:8000 inside"]
+        end
+        MLF["MLflow server\n:5001"]
+        B["Browser / curl\nlocalhost:8001"]
+    end
+    B -- "-p 8001:8000" --> API
+    API -- "http://host.docker.internal:5001\ndownload @champion at startup" --> MLF
+```
+
+---
+
+### The Big Decision: Don't Put the Model in the Image
+
+The spec asks us to decide: train during the build, copy a model file in, or neither? **Neither.** The image contains only code and libraries; the container downloads `@champion` from MLflow when it starts.
+
+| Approach | New model means... | Our choice |
+|---|---|---|
+| Train inside `docker build` | Rebuild the image (slow; build needs the data) | ❌ |
+| Copy `model.pkl` into the image | Rebuild the image | ❌ |
+| **Load `@champion` from MLflow at startup** | **Just restart the container** | ✅ |
+
+**Trade-off:** the container needs to reach the MLflow server when it starts. That's why the fail-fast settings (Task 6) matter, and why Docker Compose (Task 13) starts MLflow first.
+
+---
+
+### Step 1 — `requirements-serve.txt`: Only What the API Needs
+
+The full `requirements.txt` includes training tools (Prefect, pytest, the full MLflow server). The API needs far less, so it gets its own file — same versions, fewer packages:
+
+```text
+# API image only. Versions must match requirements.txt (same sklearn that trained the model).
+fastapi==0.141.1
+numpy==2.4.6
+pandas==3.0.6
+pydantic==2.13.5
+scikit-learn==1.9.1
+uvicorn==0.53.0
+mlflow-skinny==3.16.1
+# mlflow-skinny doesn't include skops, but MLflow 3 saves our models in skops format.
+skops==0.16.0
+```
+
+**What this does:**
+- **Same scikit-learn version as training** — a model saved by one scikit-learn version may fail to load, or behave differently, in another.
+- **`mlflow-skinny`** — MLflow's lightweight client: it can load models from a server, without the tracking server, UI and heavy extras of full `mlflow`.
+- **`skops`** — see the bug in Step 5.
+
+---
+
+### Step 2 — `.dockerignore`: Keep the Build Small and Safe
+
+Docker sends the project folder to the build (the "build context"). `.dockerignore` excludes what the image must never contain:
+
+```
+.venv
+.git
+.dvc/cache
+.dvc/tmp
+data
+models
+mlruns
+mlartifacts
+mlflow.db
+mlflow.log
+tests
+docs
+__pycache__
+*.pyc
+.pytest_cache
+```
+
+Without it, Docker would upload the 7 MB dataset, the ~700 MB of MLflow artifacts and the whole `.venv` on every build — slow, and it risks shipping data inside the image.
+
+---
+
+### Step 3 — The `Dockerfile`
+
+```dockerfile
+FROM python:3.11-slim
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1
+
+WORKDIR /app
+
+# Dependencies before code: editing main.py doesn't bust the pip layer cache.
+COPY requirements-serve.txt .
+RUN pip install --no-cache-dir -r requirements-serve.txt
+
+COPY schemas.py main.py ./
+
+ENV MLFLOW_HTTP_REQUEST_MAX_RETRIES=3 \
+    MLFLOW_HTTP_REQUEST_TIMEOUT=10
+
+RUN useradd --create-home appuser
+USER appuser
+
+EXPOSE 8000
+CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"]
+```
+
+**Line by line:**
+
+| Line | What it does |
+|---|---|
+| `FROM python:3.11-slim` | Start from official Python 3.11 on a minimal Debian — same Python as our `.venv` |
+| `PYTHONDONTWRITEBYTECODE=1` | Don't write `.pyc` cache files (useless in a container) |
+| `PYTHONUNBUFFERED=1` | Print logs immediately, so `docker logs` shows them in real time |
+| `WORKDIR /app` | All following commands run in `/app` |
+| `COPY requirements-serve.txt` → `RUN pip install` | Install libraries **before** copying code (see layer caching below) |
+| `COPY schemas.py main.py ./` | Only the two files the API needs — `features.py`, `train.py` etc. aren't required to *serve* |
+| `ENV MLFLOW_HTTP_REQUEST_...` | Fail fast if MLflow is unreachable (Task 6's finding) |
+| `useradd` / `USER appuser` | Run as an ordinary user, not root — if the app were ever compromised, the attacker isn't root inside the container |
+| `EXPOSE 8000` | Documents the port the app listens on |
+| `CMD [...]` | What runs when the container starts. `--host 0.0.0.0` is essential: `127.0.0.1` inside a container is unreachable from outside it |
+
+> 💡 **Layer caching.** Each Dockerfile instruction creates a *layer*, and Docker reuses unchanged layers on rebuild. Our layers:
+> ```
+> 506MB   RUN pip install --no-cache-dir -r requirements-serve.txt
+> 16.4kB  COPY schemas.py main.py ./
+> ```
+> Because code is copied *after* the libraries, editing `main.py` only rebuilds the 16 KB layer — the 506 MB install is reused. Copy code first and every one-line edit would reinstall everything.
+
+---
+
+### Step 4 — Build the Image
+
+```bash
+docker build -t airbnb-price-api:local .
+```
+
+**What this does:** reads the `Dockerfile` in `.` (this folder) and names the result `airbnb-price-api` with tag `local`. First build: ~50 seconds.
+
+```bash
+docker images airbnb-price-api:local --format '{{.Size}}'
+# 850MB
+```
+
+**Where the size comes from** — almost all of it is the scientific Python stack the model genuinely needs:
+
+| Package | Size |
+|---|---|
+| scipy | 122 MB |
+| pandas | 79 MB |
+| scikit-learn | 59 MB |
+| numpy | 42 MB (+29 MB libs) |
+| mlflow (skinny) | 37 MB |
+
+---
+
+### Step 5 — Run It… and the First Two Surprises
+
+```bash
+docker run -d --name airbnb-api -p 8001:8000 \
+  -e MLFLOW_TRACKING_URI=http://host.docker.internal:5001 \
+  airbnb-price-api:local
+```
+
+**What the flags mean:**
+
+| Flag | Meaning |
+|---|---|
+| `-d` | Run in the background ("detached") |
+| `--name airbnb-api` | A name to refer to it by |
+| `-p 8001:8000` | Mac port 8001 → container port 8000 |
+| `-e MLFLOW_TRACKING_URI=...` | Environment variable inside the container |
+| `host.docker.internal` | Docker Desktop's special name for **your Mac** as seen from inside a container. `127.0.0.1` inside a container means the container itself, not your Mac! |
+
+**Surprise 1 — `port is already allocated`.** We first tried `-p 8000:8000`:
+```
+Bind for 0.0.0.0:8000 failed: port is already allocated
+```
+`docker ps` showed a container from a different project (`ai-engineering-bootcamp-api-1`) already publishing port 8000 — it restarted automatically when Docker Desktop opened. Rather than stop someone else's container, we use Mac port **8001**. Inside the container the API still listens on 8000; only the outside mapping changes.
+
+> 💡 **Finding who holds a port:** `lsof -nP -iTCP:8000 -sTCP:LISTEN`. If it says `com.docker.backend`, a container owns it — run `docker ps` to see which.
+
+**Surprise 2 — `No module named 'skops'`.**
+```
+INFO:     Loading models:/AirbnbPriceModel@champion from http://host.docker.internal:5001
+ModuleNotFoundError: No module named 'skops'
+ERROR:    Application startup failed. Exiting.
+```
+
+We had actually predicted this before building: checking dependencies showed `skops` is installed by the full `mlflow` package but **not** by `mlflow-skinny`. And since Task 7, MLflow saves our models in skops format. We built once without it anyway to *see* the failure rather than assume it.
+
+Notice what the log also proves:
+- The container **reached MLflow** through `host.docker.internal:5001` — networking and the `--allowed-hosts` list work.
+- It **failed fast and clearly** instead of hanging.
+
+**Fix:** pin `skops==0.16.0` (the venv's exact version) in `requirements-serve.txt`, with a comment explaining why, then rebuild.
+
+---
+
+### Step 6 — Verify the Container
+
+After the rebuild:
+```
+INFO:     Loading models:/AirbnbPriceModel@champion from http://host.docker.internal:5001
+INFO:     Model loaded
+INFO:     Application startup complete.
+```
+Ready in about 2 seconds.
+
+```bash
+curl -s localhost:8001/health
+# {"status":"ok","model_uri":"models:/AirbnbPriceModel@champion"}
+```
+
+| Listing | From the container | From Task 8 (laptop) |
+|---|---|---|
+| Midtown entire home | $244.25 | $244.25 ✅ |
+| Midtown private room | $129.44 | $129.44 ✅ |
+| Williamsburg entire home | $190.16 | $190.16 ✅ |
+| Fordham shared room | $38.59 | $38.59 ✅ |
+| `latitude: -75` | HTTP 422 | HTTP 422 ✅ |
+
+Identical to the cent — the same model with the same library versions.
+
+Hygiene checks:
+```bash
+docker exec airbnb-api whoami          # appuser            (not root ✅)
+docker exec airbnb-api ls /app         # main.py requirements-serve.txt schemas.py   (no data/models ✅)
+docker exec airbnb-api printenv MLFLOW_HTTP_REQUEST_MAX_RETRIES MLFLOW_HTTP_REQUEST_TIMEOUT
+# 3
+# 10
+```
+
+**Fail-fast check** — MLflow unreachable (wrong port on purpose):
+```bash
+docker run --name airbnb-api-dead -e MLFLOW_TRACKING_URI=http://host.docker.internal:5999 airbnb-price-api:local
+```
+```
+INFO:     Loading models:/AirbnbPriceModel@champion from http://host.docker.internal:5999
+ERROR:    Application startup failed. Exiting.
+```
+Exited with code 3 after **14 seconds** — exactly the retry budget we set — instead of the ~4-minute silent hang we measured in Task 6. ✅
+
+Clean up test containers:
+```bash
+docker rm -f airbnb-api airbnb-api-dead
+```
+
+---
+
+### Step 7 — Commit
+
+```bash
+git add requirements-serve.txt Dockerfile .dockerignore
+git commit -m "feat: slim Docker image that loads the champion from MLflow at startup"
+```
+
+---
+
+### What You Should Have at the End of Task 9
+
+```
+NYC-Airbnb-Price-Prediction/
+├── Dockerfile                  ← python:3.11-slim, non-root, fail-fast env
+├── .dockerignore               ← keeps data, models, venv, tests out of the image
+├── requirements-serve.txt      ← API-only deps (+ skops)
+└── ... (Task 1–8 files)
+```
+
+**Docker image:** `airbnb-price-api:local` (850 MB, of which our code is 16 KB)
+**Run it:**
+```bash
+docker run -d --name airbnb-api -p 8001:8000 \
+  -e MLFLOW_TRACKING_URI=http://host.docker.internal:5001 airbnb-price-api:local
+# → http://localhost:8001/docs
+```
+**Commit:** `87ac39f feat: slim Docker image that loads the champion from MLflow at startup`
+
+---
+
+---
+
+# TASK 10 — Prefect: Automated Retraining
+
+*Written when Task 10 is built.*
+
+**Preview:** one Prefect flow does the whole training pipeline: load data (with automatic retries) → split → train and log all 5 configs → promote the best model under the size budget → optionally trigger the deploy workflow. We run it by hand first, prove the retries work, then schedule it weekly. Scheduling needs a **Prefect server in its own terminal (activate the venv there)**.

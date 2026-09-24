@@ -10,12 +10,14 @@
 
 **Source spec:** `Implementation_Plan_NYC_Airbnb_Price_Prediction.md` (repo root). Section/phase numbers below refer to it.
 
-> **Status (2026-09-24):** Tasks 1–8 are implemented. Where the code in the repo differs from the snippets below, **the repo is the source of truth**. The differences are:
+> **Status (2026-09-24):** Tasks 1–9 are implemented. Where the code in the repo differs from the snippets below, **the repo is the source of truth**. The differences are:
 > - `httpx2` instead of `httpx`
 > - local MLflow on **port 5001** (macOS AirPlay holds 5000; CI/Compose-internal stay 5000)
 > - `skops_trusted_types` in `track_experiments.py`
 > - a `model_size_mb` metric plus `MAX_MODEL_SIZE_MB = 100` in the selection rule (champion = `rf_300_depth10`)
 > - `registry.logged_model_uri()` registering `models:/m-…` rather than `runs:/<id>/model`
+> - `requirements-serve.txt` also pins `skops` (`mlflow-skinny` omits it, but it's needed to load our models)
+> - the API container uses host port **8001** (another local container holds 8000)
 >
 > `implementation.md` documents each of these.
 
