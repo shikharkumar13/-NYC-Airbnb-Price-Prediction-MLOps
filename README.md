@@ -49,6 +49,7 @@ Trained on 38,771 listings and evaluated on 9,693 held-out listings. Errors are 
 | `orchestrate_training.py` | Prefect flow: load (with retries) → train ×5 → promote → trigger deploy |
 | `schemas.py` / `main.py` | Pydantic validation (NYC bounds, etc.) and the FastAPI app |
 | `Dockerfile`, `requirements-serve.txt` | API image: slim, non-root, fails fast if MLflow is down |
+| `docker-compose.yml` | MLflow + API together; API gated on MLflow's healthcheck |
 | `.github/workflows/ci.yml` | On every PR: throwaway MLflow → seed champion → tests → build image |
 | `.github/workflows/deploy.yml` | On demand: build amd64 + arm64 and push to Docker Hub |
 | `scripts/` | CI sample and seeding, and `trigger_deploy.py` (GitHub API) |
@@ -67,7 +68,17 @@ dvc pull                           # fetches data/AB_NYC_2019.csv from the DVC r
 
 ## Run it
 
-Each server needs its own terminal, with the venv active. This project runs MLflow on port **5001**, because macOS AirPlay Receiver uses 5000.
+**Quickest: Docker Compose** starts the MLflow server (host port 5001) and the API (host port 8001) together. The API waits until MLflow's healthcheck passes:
+
+```bash
+docker compose up -d          # MLflow UI → http://127.0.0.1:5001 · API → http://127.0.0.1:8001/docs
+docker compose logs -f api    # watch it load @champion
+docker compose down           # stop (data stays in ./mlflow.db and ./mlartifacts)
+```
+
+Compose reuses this folder's `mlflow.db` and `mlartifacts/`, so don't also run a host `mlflow server` at the same time. After promoting a new champion, run `docker compose restart api`.
+
+**Or run each part by hand.** Each server needs its own terminal, with the venv active. This project runs MLflow on port **5001**, because macOS AirPlay Receiver uses 5000.
 
 ```bash
 # Terminal 1: MLflow tracking server + registry
@@ -129,4 +140,3 @@ CI uses the sample because the real dataset lives in a DVC remote on a laptop, w
 - **Modest accuracy (R² ≈ 0.46).** The data has location, room type and booking activity, but nothing about size, bedrooms or amenities.
 - **Artifact storage grows** by ~377 MB per retrain, mostly the oversized forest that is never promoted. Old runs need periodic cleanup (`mlflow gc`).
 - **The DVC remote and MLflow server are local to one laptop.** A team setup would move both to shared storage (for example S3) and a hosted server.
-- **Docker Compose (spec Phase 11, optional) was not implemented.** Its design is in the build plan under `docs/superpowers/plans/`.
