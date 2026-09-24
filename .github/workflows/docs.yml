@@ -1,0 +1,16 @@
+name: Docs
+
+# airbnb_mlops_guide.md embeds the project's code files. This fails a pull
+# request if the code (or docs/guide/) changed without rebuilding the guide.
+on:
+  pull_request:
+
+jobs:
+  guide-up-to-date:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.11"
+      - run: python docs/guide/build.py --check
