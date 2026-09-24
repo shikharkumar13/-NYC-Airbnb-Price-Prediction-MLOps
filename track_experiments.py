@@ -5,6 +5,7 @@ carries its own log1p/expm1 target transform.
 """
 import mlflow
 import mlflow.sklearn
+from mlflow.models import Model
 from sklearn.ensemble import GradientBoostingRegressor, RandomForestRegressor
 from sklearn.linear_model import LinearRegression
 
@@ -39,12 +40,18 @@ def train_and_log(run_name, X_train, X_test, y_train, y_test):
             {"model_type": model_class.__name__, "target_transform": "log1p/expm1", **params}
         )
         mlflow.log_metrics(metrics)
-        mlflow.sklearn.log_model(
+        model_info = mlflow.sklearn.log_model(
             model,
             name="model",
             input_example=X_train.head(3),
             skops_trusted_types=SKOPS_TRUSTED_TYPES,
         )
+        # The API downloads and holds the champion in memory, so size is a
+        # selection criterion (registry.MAX_MODEL_SIZE_MB). MLflow records the
+        # size in the MLmodel file; reading it doesn't download the model.
+        size_bytes = Model.load(model_info.model_uri).model_size_bytes
+        metrics["model_size_mb"] = round(size_bytes / 1e6, 1)
+        mlflow.log_metric("model_size_mb", metrics["model_size_mb"])
     return run.info.run_id, metrics
 
 
@@ -54,7 +61,10 @@ def main():
     splits = split_data(clean_data(load_data()))
     for run_name in CONFIGS:
         run_id, m = train_and_log(run_name, *splits)
-        print(f"{run_name:16s} rmse={m['rmse']:7.2f}  mae={m['mae']:6.2f}  r2={m['r2']:.3f}  run_id={run_id}")
+        print(
+            f"{run_name:16s} rmse={m['rmse']:7.2f}  mae={m['mae']:6.2f}  r2={m['r2']:.3f}  "
+            f"size={m['model_size_mb']:6.1f}MB  run_id={run_id}"
+        )
 
 
 if __name__ == "__main__":
