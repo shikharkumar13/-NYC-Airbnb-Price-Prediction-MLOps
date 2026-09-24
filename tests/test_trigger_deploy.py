@@ -33,6 +33,19 @@ def test_trigger_deploy_accepts_200_with_run_details(captured):
     assert td.trigger_deploy("3", repo="me/airbnb", token="tok") is True
 
 
-def test_trigger_deploy_reports_failure(captured):
-    captured["response"] = FakeResponse(401, "Bad credentials")
-    assert td.trigger_deploy("3", repo="me/airbnb", token="bad") is False
+def test_trigger_deploy_raises_with_githubs_reason(captured):
+    # A rejected trigger must not look like success: the Prefect task has to
+    # fail, and GitHub's reason has to reach the Prefect logs.
+    captured["response"] = FakeResponse(403, "Resource not accessible by personal access token")
+    with pytest.raises(td.DeployTriggerError, match="403.*Resource not accessible"):
+        td.trigger_deploy("3", repo="me/airbnb", token="weak")
+
+
+def test_request_deploy_task_fails_when_github_rejects(captured, monkeypatch):
+    import orchestrate_training
+
+    monkeypatch.setenv("GITHUB_REPO", "me/airbnb")
+    monkeypatch.setenv("GITHUB_TOKEN", "weak")
+    captured["response"] = FakeResponse(403, "Resource not accessible by personal access token")
+    with pytest.raises(td.DeployTriggerError):
+        orchestrate_training.request_deploy.fn("4")

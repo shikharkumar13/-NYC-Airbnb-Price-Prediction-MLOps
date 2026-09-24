@@ -12,6 +12,10 @@ import requests
 WORKFLOW_FILE = "deploy.yml"
 
 
+class DeployTriggerError(RuntimeError):
+    """GitHub refused to start the deploy workflow."""
+
+
 def trigger_deploy(model_version: str, repo: str, token: str, ref: str = "main") -> bool:
     response = requests.post(
         f"https://api.github.com/repos/{repo}/actions/workflows/{WORKFLOW_FILE}/dispatches",
@@ -24,9 +28,13 @@ def trigger_deploy(model_version: str, repo: str, token: str, ref: str = "main")
         timeout=10,
     )
     # GitHub answers 204 (or 200 when returning run details) on success.
+    # Anything else raises, so a caller like the Prefect flow fails visibly
+    # (with GitHub's reason in its logs) instead of reporting success.
     if response.status_code not in (200, 204):
-        print(f"deploy trigger failed: {response.status_code} {response.text}", file=sys.stderr)
-        return False
+        raise DeployTriggerError(
+            f"GitHub refused to start {WORKFLOW_FILE} for {repo}: "
+            f"{response.status_code} {response.text}"
+        )
     return True
 
 
@@ -34,8 +42,11 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--model-version", required=True)
     args = parser.parse_args()
-    ok = trigger_deploy(args.model_version, os.environ["GITHUB_REPO"], os.environ["GITHUB_TOKEN"])
-    sys.exit(0 if ok else 1)
+    try:
+        trigger_deploy(args.model_version, os.environ["GITHUB_REPO"], os.environ["GITHUB_TOKEN"])
+    except DeployTriggerError as error:
+        sys.exit(str(error))
+    print(f"deploy requested for model v{args.model_version}")
 
 
 if __name__ == "__main__":
