@@ -19,8 +19,8 @@
 | **7** | MLflow Tracking | Five logged experiments on an MLflow server | ✅ Done |
 | **8** | MLflow Registry | Best model promoted to `@champion` | ✅ Done |
 | **9** | Docker | Slim API image that loads the champion at startup | ✅ Done |
-| **10** | Prefect | Automated, scheduled retraining flow | ⏳ Next |
-| **11** | GitHub Actions | CI — tests on every pull request | ⬜ |
+| **10** | Prefect | Automated, scheduled retraining flow | ✅ Done |
+| **11** | GitHub Actions | CI — tests on every pull request | ⏳ Next |
 | **12** | GitHub Actions, Docker Hub | CD — push the image when a new model is promoted | ⬜ |
 | **13** | Docker Compose | MLflow + API running together (optional) | ⬜ |
 | **14** | — | Definition-of-done check + README | ⬜ |
@@ -2250,6 +2250,308 @@ docker run -d --name airbnb-api -p 8001:8000 \
 
 # TASK 10 — Prefect: Automated Retraining
 
-*Written when Task 10 is built.*
+---
 
-**Preview:** one Prefect flow does the whole training pipeline: load data (with automatic retries) → split → train and log all 5 configs → promote the best model under the size budget → optionally trigger the deploy workflow. We run it by hand first, prove the retries work, then schedule it weekly. Scheduling needs a **Prefect server in its own terminal (activate the venv there)**.
+### What Problem This Solves
+
+Right now retraining means a person running `python track_experiments.py`, then `python registry.py`, in the right order, and remembering to do it at all. Real models go stale: new listings arrive, prices shift. We want the whole pipeline to run **by itself, on a schedule**. When a step fails (the data file is briefly unavailable, say), it should retry automatically, and afterwards we should be able to see what happened.
+
+**Prefect** is an *orchestrator*: you mark Python functions as **tasks**, combine them in a **flow**, and Prefect handles retries, logging, a run history and scheduling. The **Prefect server** keeps that history and shows it in a dashboard.
+
+```mermaid
+flowchart LR
+    subgraph flow ["Flow: airbnb-price-training"]
+        L["load_data\n(retries=2, 5 s apart)"] --> S["split_data"]
+        S --> T1["train_and_log\nlinreg_baseline"]
+        S --> T2["train_and_log\nrf_100"]
+        S --> T3["train_and_log\nrf_300_depth10"]
+        S --> T4["train_and_log\ngb_100_lr01"]
+        S --> T5["train_and_log\ngb_200_lr005"]
+        T1 & T2 & T3 & T4 & T5 --> P["promote_best_model\n(≤100 MB, lowest RMSE)"]
+        P --> D["request_deploy\n(GitHub, Task 12)"]
+    end
+    SCH["⏰ Schedule\nMondays 03:00 UTC"] --> flow
+    flow -- "runs, params, metrics, models" --> MLF["MLflow :5001"]
+    flow -- "task states, logs, history" --> PF["Prefect server :4200"]
+```
+
+We now have three long-running terminals:
+
+| Terminal | Runs |
+|---|---|
+| 1 | MLflow server (`:5001`) |
+| 2 | Your working terminal |
+| 3 | Prefect server (`:4200`) |
+
+---
+
+### Step 1 — `scripts/trigger_deploy.py`: The Hand-Off to CD (Tested Now, Used in Task 12)
+
+The last step of the flow asks GitHub Actions to build and publish a new image. GitHub has an API for "run this workflow now" (a `workflow_dispatch`):
+
+```python
+def trigger_deploy(model_version: str, repo: str, token: str, ref: str = "main") -> bool:
+    response = requests.post(
+        f"https://api.github.com/repos/{repo}/actions/workflows/{WORKFLOW_FILE}/dispatches",
+        headers={
+            "Accept": "application/vnd.github+json",
+            "Authorization": f"Bearer {token}",
+            "X-GitHub-Api-Version": "2022-11-28",
+        },
+        json={"ref": ref, "inputs": {"model_version": str(model_version)}},
+        timeout=10,
+    )
+    # GitHub answers 204 (or 200 when returning run details) on success.
+    if response.status_code not in (200, 204):
+        print(f"deploy trigger failed: {response.status_code} {response.text}", file=sys.stderr)
+        return False
+    return True
+```
+
+We don't have a GitHub repo yet, so the tests replace `requests.post` with a fake (the same `monkeypatch` trick as the API's fake model) and check what *would* be sent:
+
+| Test | What it proves |
+|---|---|
+| `test_trigger_deploy_dispatches_deploy_workflow` | Correct URL, `Bearer` token, and `model_version` input |
+| `test_trigger_deploy_accepts_200_with_run_details` | Both of GitHub's success codes count as success |
+| `test_trigger_deploy_reports_failure` | A `401 Bad credentials` returns `False` instead of pretending it worked |
+
+---
+
+### Step 2 — `orchestrate_training.py`: The Flow
+
+```python
+@task(retries=2, retry_delay_seconds=5)
+def load_data():
+    return features.clean_data(features.load_data())
+
+
+@task
+def split_data(df):
+    return features.split_data(df)
+
+
+@task
+def train_and_log(run_name, splits):
+    run_id, metrics = track_experiments.train_and_log(run_name, *splits)
+    get_run_logger().info(...)
+    return run_id, metrics
+
+
+@task
+def promote_best_model(results):
+    run_id = pick_best(results)
+    version = register_and_promote(run_id)
+    ...
+    return version
+
+
+@task
+def request_deploy(version):
+    repo, token = os.environ.get("GITHUB_REPO"), os.environ.get("GITHUB_TOKEN")
+    if not (repo and token):
+        get_run_logger().warning("GITHUB_REPO/GITHUB_TOKEN not set; skipping deploy trigger")
+        return False
+    return trigger_deploy(version, repo, token)
+
+
+@flow(name="airbnb-price-training")
+def training_flow():
+    require_tracking_uri()
+    mlflow.set_experiment(EXPERIMENT_NAME)
+    splits = split_data(load_data())
+    results = {}
+    for run_name in track_experiments.CONFIGS:
+        run_id, metrics = train_and_log(run_name, splits)
+        results[run_id] = metrics
+    version = promote_best_model(results)
+    request_deploy(version)
+    return version
+```
+
+**What this does:**
+- **The tasks are thin wrappers.** All the real logic already exists and is tested: `features.py`, `track_experiments.train_and_log`, `registry.pick_best` / `register_and_promote`. Prefect adds retries, logging and history *around* it, so there's no duplicated logic.
+- **`@task(retries=2, retry_delay_seconds=5)` on `load_data` only** — loading data is the step most likely to fail temporarily (a network drive, a slow `dvc pull`). Retrying training wouldn't fix a bug in the code.
+- **`MLFLOW_TRACKING_URI` comes from the environment** (`require_tracking_uri()`), never hardcoded.
+- **The same size-budget rule as Task 8** picks the winner, so an automatic run makes the same choice you made by hand.
+- **Deploy is optional.** No GitHub credentials → a clear warning, and the flow still succeeds.
+
+---
+
+### Step 3 — Pre-Check: Where Is Prefect's Server?
+
+```bash
+prefect config view
+# PREFECT_PROFILE='local'
+# PREFECT_API_URL='http://127.0.0.1:4200/api' (from profile)
+```
+
+This machine's Prefect profile (from an earlier project) already points at a server on port 4200, so even a one-off run needs that server running. It wasn't:
+
+```bash
+curl -s http://127.0.0.1:4200/api/health     # connection refused
+```
+
+> ⚠️ **The Anaconda trap, again.** Anaconda also ships a `prefect` (`/opt/anaconda3/bin/prefect`). In any new terminal, check `which prefect` points into `.venv/`.
+
+Start the server in **terminal 3**:
+```bash
+cd "/Users/kumarshikhar/MLOps Projects/NYC-Airbnb-Price-Prediction"
+conda deactivate          # only if the prompt shows (base)
+source .venv/bin/activate # ⚠️ new terminal = activate again
+which prefect             # .../.venv/bin/prefect
+prefect server start
+```
+
+Dashboard: **http://127.0.0.1:4200**. It keeps its history in `~/.prefect/prefect.db`, shared across projects, so you'll also see runs from earlier ones.
+
+---
+
+### Step 4 — Run the Flow by Hand First
+
+The spec says to schedule only after a manual run works:
+
+```bash
+export MLFLOW_TRACKING_URI=http://127.0.0.1:5001
+python orchestrate_training.py
+```
+
+Output (47 seconds, trimmed):
+```
+Task run 'load_data-fdf' - Finished in state Completed()
+Task run 'split_data-2e8' - Finished in state Completed()
+Task run 'train_and_log-c11' - linreg_baseline rmse=83.54 mae=47.08 r2=0.395 size=0.3MB
+Task run 'train_and_log-37d' - rf_100 rmse=77.53 mae=43.39 r2=0.479 size=326.0MB
+Task run 'train_and_log-524' - rf_300_depth10 rmse=78.75 mae=43.81 r2=0.463 size=39.3MB
+Task run 'train_and_log-82f' - gb_100_lr01 rmse=81.13 mae=44.90 r2=0.430 size=3.9MB
+Task run 'train_and_log-4bf' - gb_200_lr005 rmse=81.21 mae=44.92 r2=0.429 size=7.4MB
+Task run 'promote_best_model-184' - promoted run c12ba16c... as AirbnbPriceModel v2 @champion
+Task run 'request_deploy-710' - GITHUB_REPO/GITHUB_TOKEN not set; skipping deploy trigger
+Flow run 'loyal-cow' - Finished in state Completed()
+note: 2d27675c... has a lower RMSE but is over the 100 MB budget
+```
+
+Verified separately (not just from the log):
+```
+@champion -> v2: rf_300_depth10 (run c12ba16c), rmse=78.75, size=39.3MB
+prefect flow run: loyal-cow | COMPLETED | 44.5 s
+```
+
+> 💡 Prefect gives every run a random two-word name (`loyal-cow`, `hopeful-llama`…) so they're easy to tell apart in the dashboard.
+
+---
+
+### Step 5 — Prove the Retries Actually Work
+
+Point the flow at a file that doesn't exist:
+
+```bash
+DATA_PATH=nope.csv python orchestrate_training.py
+```
+```
+20:44:15.348 | Task run 'load_data-b32' - ... FileNotFoundError ... - Retry 1/2 will start 5 second(s) from now
+20:44:20.357 | Task run 'load_data-b32' - ... FileNotFoundError ... - Retry 2/2 will start 5 second(s) from now
+20:44:25.365 | Task run 'load_data-b32' - ... FileNotFoundError ... - Retries are exhausted
+20:44:26.400 | Flow run 'russet-piculet' - Finished in state Failed("... No such file or directory: 'nope.csv'")
+```
+
+| Check | Result |
+|---|---|
+| Attempts | 3 (1 try + 2 retries) ✅ |
+| Gap between attempts | exactly 5 seconds (15.3 → 20.4 → 25.4) ✅ |
+| Flow outcome | `Failed`, exit code 1, real cause shown ✅ |
+| MLflow before → after | 17 runs, 2 versions → 17 runs, 2 versions — nothing trained on bad data ✅ |
+
+---
+
+### Step 6 — Schedule It
+
+```bash
+python orchestrate_training.py --serve
+```
+
+which calls:
+```python
+training_flow.serve(name="weekly-retrain", cron="0 3 * * 1")  # Mondays 03:00
+```
+
+**What `.serve()` does:**
+1. Registers a **deployment**, a named, scheduled version of the flow: `airbnb-price-training/weekly-retrain`.
+2. Keeps running, polling the Prefect server for runs that are due, and executes them.
+
+```
+Your flow 'airbnb-price-training' is being served and polling for scheduled runs!
+To trigger a run for this flow, use the following command:
+        $ prefect deployment run 'airbnb-price-training/weekly-retrain'
+```
+
+**Reading the cron `0 3 * * 1`:** minute 0, hour 3, any day of the month, any month, weekday 1 (Monday). The timezone is empty, which means **UTC**.
+
+We then triggered one run *through the deployment* to prove the scheduled path works end to end, not just a direct Python call:
+
+```bash
+prefect deployment run 'airbnb-price-training/weekly-retrain'
+# Created flow run 'hopeful-llama'.
+```
+The serving process picked it up, retrained all five, and finished:
+```
+promoted run e40349c5... as AirbnbPriceModel v3 @champion
+Flow run 'hopeful-llama' - Finished in state Completed()
+```
+
+> ⚠️ **The serving process must keep running for the schedule to fire.** When we stopped it, Prefect paused the schedule cleanly:
+> ```
+> prefect.runner - Pausing all deployments...
+> prefect.runner - All deployments have been paused!
+> ```
+> A laptop that's asleep at 03:00 Monday won't retrain anyway. To keep it live on this machine, run `python orchestrate_training.py --serve` in its own terminal (venv active, `MLFLOW_TRACKING_URI` exported). In real deployments, the serving process lives on an always-on server.
+
+---
+
+### Step 7 — Known Issue: Disk Usage Grows With Every Retrain
+
+After four full training rounds, `mlartifacts/` is **1.4 GB**. Each round saves about 377 MB, and 326 MB of that is `rf_100`, the unlimited-depth forest that the size budget never promotes. On a weekly schedule that's about 20 GB a year.
+
+Possible fixes, not applied yet:
+- Delete old, non-champion runs periodically, then run `mlflow gc` to free their files.
+- Drop `rf_100` from the scheduled flow (a deviation from the spec's five configs).
+- Cap its depth.
+
+---
+
+### Step 8 — Commit
+
+```bash
+git add orchestrate_training.py scripts/trigger_deploy.py tests/test_trigger_deploy.py
+git commit -m "feat: Prefect training flow with retries, promotion and deploy trigger"
+```
+
+---
+
+### What You Should Have at the End of Task 10
+
+```
+NYC-Airbnb-Price-Prediction/
+├── orchestrate_training.py       ← Prefect flow + --serve schedule
+├── scripts/
+│   └── trigger_deploy.py         ← asks GitHub to run deploy.yml
+├── tests/
+│   └── test_trigger_deploy.py    ← 3 tests with a fake HTTP call
+└── ... (Task 1–9 files)
+```
+
+**Running:** Prefect server on http://127.0.0.1:4200 (terminal 3)
+**Prefect deployment:** `airbnb-price-training/weekly-retrain`, cron `0 3 * * 1` (UTC), currently **paused**
+**MLflow registry:** `@champion` → **v3** (`rf_300_depth10`, promoted automatically by the flow)
+**Tests:** 45 passed with the MLflow server configured
+**Commit:** `f9cb16e feat: Prefect training flow with retries, promotion and deploy trigger`
+
+---
+
+---
+
+# TASK 11 — GitHub Actions CI
+
+*Written when Task 11 is built.*
+
+**Preview:** create a GitHub repository and push the project. A CI workflow will run on every pull request. It starts a throwaway MLflow server, trains a quick baseline on the 2,000-row sample and promotes it to `@champion`, runs all tests (including the real-registry ones), then builds the Docker image. Needs a GitHub account and repo.
