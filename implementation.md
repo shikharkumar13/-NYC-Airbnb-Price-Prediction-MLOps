@@ -13,8 +13,8 @@
 | **1** | Git, uv, pip | Project scaffold, virtual env, pinned requirements | ✅ Done |
 | **2** | DVC | Versioned dataset with a local remote | ✅ Done |
 | **3** | pandas, scikit-learn, pytest | Shared cleaning + model-building module, tests, CI sample | ✅ Done |
-| **4** | scikit-learn, joblib | Baseline training script (`train.py`) | ⏳ Next |
-| **5** | Pydantic | Input/output schemas with validation | ⬜ |
+| **4** | scikit-learn, joblib | Baseline training script (`train.py`) | ✅ Done |
+| **5** | Pydantic | Input/output schemas with validation | ⏳ Next |
 | **6** | FastAPI | Prediction REST API | ⬜ |
 | **7** | MLflow Tracking | Five logged experiments on an MLflow server | ⬜ |
 | **8** | MLflow Registry | Best model promoted to `@champion` | ⬜ |
@@ -765,6 +765,157 @@ NYC-Airbnb-Price-Prediction/
 
 # TASK 4 — Baseline Training Script (`train.py`)
 
-*Written when Task 4 is built.*
+---
 
-**Preview of what to expect** (from a trial run while planning): 48,464 rows after cleaning (38,771 train / 9,693 test), and for LinearRegression RMSE ≈ $83.5, MAE ≈ $47, R² ≈ 0.40. A plausible RMSE is **tens of dollars** — if it's in the thousands, or below 1, the log/dollar conversion is the first thing to check.
+### What Problem This Solves
+
+Before bringing in MLflow, Docker, or anything fancy, we need proof that the **whole pipeline works end to end** on the real data: load → clean → split → train → score → save → reload. That's the job of a *baseline*: the simplest reasonable model, giving us a number every later model has to beat.
+
+We use **LinearRegression** — fast, simple, and hard to get wrong. If something is broken, it's in the pipeline, not in a fancy model.
+
+```mermaid
+flowchart LR
+    A["data/AB_NYC_2019.csv\n48,895 rows"] --> B["clean_data\n48,464 rows"]
+    B --> C["split_data\n80% train / 20% test"]
+    C --> D["build_model(LinearRegression)\n.fit(train)"]
+    D --> E["evaluate(test)\nRMSE · MAE · R² in $"]
+    D --> F["joblib.dump\nmodels/model.pkl"]
+    F --> G["joblib.load\nsame predictions?"]
+```
+
+---
+
+### Understanding the Three Regression Metrics
+
+| Metric | Plain meaning | Good direction |
+|---|---|---|
+| **RMSE** (root mean squared error) | Typical error in dollars, but big misses count extra (errors are squared before averaging) | Lower |
+| **MAE** (mean absolute error) | Average miss in dollars — "on average we're off by $X" | Lower |
+| **R²** | Share of the price variation the model explains. 1.0 = perfect, 0 = no better than always guessing the average, negative = worse than that | Higher |
+
+RMSE is always ≥ MAE. The gap between them tells you how much of the error comes from a few large misses.
+
+---
+
+### Step 1 — Write `train.py`
+
+```python
+from pathlib import Path
+
+import joblib
+from sklearn.linear_model import LinearRegression
+
+from features import build_model, clean_data, evaluate, load_data, split_data
+
+MODEL_PATH = Path("models/model.pkl")
+
+
+def main():
+    df = clean_data(load_data())
+    X_train, X_test, y_train, y_test = split_data(df)
+    print(f"rows after cleaning: {len(df)}  (train={len(X_train)}, test={len(X_test)})")
+
+    model = build_model(LinearRegression()).fit(X_train, y_train)
+    for name, value in evaluate(model, X_test, y_test).items():
+        print(f"{name}: {value:.3f}")
+
+    MODEL_PATH.parent.mkdir(exist_ok=True)
+    joblib.dump(model, MODEL_PATH)
+    reloaded = joblib.load(MODEL_PATH)
+    assert (reloaded.predict(X_test.head()) == model.predict(X_test.head())).all()
+    print(f"saved and reloaded {MODEL_PATH}")
+```
+
+**What this does:**
+- The whole script is ~15 lines because every rule lives in `features.py` (Task 3). `train.py` only *wires the steps together*.
+- `evaluate` scores on the **test set** — data the model never saw during training. Scoring on training data would flatter the model.
+- `joblib.dump` saves the fitted model (preprocessing + regressor + log/dollar conversion, all in one object) to a file.
+- The reload-and-compare line proves the saved file really works — not just that *something* was written to disk.
+
+> 💡 **Where's the `expm1`?** There isn't one in this file, on purpose. The model returned by `build_model` converts log-price back to dollars inside `.predict()` (see Task 3), so `evaluate` already sees dollars.
+
+---
+
+### Step 2 — Run It
+
+```bash
+python train.py
+```
+
+Output:
+```
+rows after cleaning: 48464  (train=38771, test=9693)
+rmse: 83.545
+mae: 47.077
+r2: 0.395
+saved and reloaded models/model.pkl
+```
+
+It takes about 1.4 seconds, and `models/model.pkl` is 9.6 KB.
+
+**Where 48,464 comes from:** 48,895 raw rows − 11 rows at `$0` − 420 rows above `$800` = 48,464.
+
+---
+
+### Step 3 — Are These Numbers Sane?
+
+**Check 1 — Right scale?** RMSE $83.5 is "tens of dollars". ✅ If it had printed `0.5` we'd be scoring log prices. If it had printed `4,000` the conversion back would be broken.
+
+**Check 2 — Better than guessing?** We compared against a model that ignores every feature and always predicts the same typical price:
+
+| Model | RMSE | MAE | R² |
+|---|---|---|---|
+| Always guess the typical price | $110.91 | $71.07 | -0.065 |
+| **LinearRegression baseline** | **$83.55** | **$47.08** | **0.395** |
+
+The baseline cuts the average miss from $71 to $47 — the features carry real signal.
+
+> 💡 **Why is the "always guess" R² slightly negative instead of exactly 0?** It's trained on log prices, so its single guess is the *log-average* (about $110), which is lower than the plain dollar average. R² measures against the plain dollar average, so this guess scores a little worse than zero.
+
+**Check 3 — Do individual predictions make sense?** Same host details, different location and room type:
+
+| Listing | Predicted price |
+|---|---|
+| Midtown Manhattan, entire home | $284.37 |
+| Midtown Manhattan, private room | $142.57 |
+| Fordham (Bronx), shared room | $36.18 |
+
+Entire home > private room > shared room in the Bronx — exactly the order you'd expect. ✅
+
+**How good is R² = 0.40?** It's a modest start. We only have location, room type and booking activity; nothing about size, bedrooms, photos or amenities. The tree-based models in Task 7 should do better, and now we have the number they have to beat.
+
+---
+
+### Step 4 — Commit (the Code, Not the Model)
+
+```bash
+git add train.py
+git commit -m "feat: baseline LinearRegression training script (log-price target)"
+```
+
+`models/model.pkl` is **not** committed — `models/` is in `.gitignore`. It's a quick local sanity artifact only. From Task 7 onwards, models are stored and versioned in the **MLflow registry**, which is what the API will load from.
+
+---
+
+### What You Should Have at the End of Task 4
+
+```
+NYC-Airbnb-Price-Prediction/
+├── train.py                  ← baseline training script, IN Git
+├── models/
+│   └── model.pkl             ← 9.6 KB saved model, NOT in Git
+└── ... (Task 1–3 files)
+```
+
+**Baseline to beat:** RMSE $83.55 · MAE $47.08 · R² 0.395
+**Commit:** `3eb494b feat: baseline LinearRegression training script (log-price target)`
+
+---
+
+---
+
+# TASK 5 — Pydantic Schemas (`schemas.py`)
+
+*Written when Task 5 is built.*
+
+**Preview:** a `Listing` input model whose fields exactly match the model's 10 features. It includes validation such as NYC-only latitude/longitude bounds (a listing "in Antarctica" is rejected), `minimum_nights ≥ 1` and `availability_365` between 0 and 365. We'll also break a rule on purpose to watch a test fail.
