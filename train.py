@@ -1,4 +1,4 @@
-"""Phase 3 baseline: LinearRegression trained on log1p(price), scored in dollars.
+"""Baseline (implementation.md, Task 4): LinearRegression trained on log1p(price), scored in dollars.
 
 features.build_model wraps the pipeline in a TransformedTargetRegressor that
 fits on log1p(price) and applies expm1 on predict, so the metrics printed

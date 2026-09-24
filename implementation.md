@@ -262,7 +262,7 @@ testpaths = tests
 ### Step 7 — Commit
 
 ```bash
-git add .gitignore requirements.txt pytest.ini README.md Implementation_Plan_NYC_Airbnb_Price_Prediction.md docs/
+git add .gitignore requirements.txt pytest.ini README.md docs/
 git commit -m "chore: project scaffold, pinned requirements, pytest config"
 ```
 
@@ -278,7 +278,6 @@ NYC-Airbnb-Price-Prediction/
 ├── pytest.ini
 ├── requirements.txt                             ← 12 pinned libraries
 ├── README.md
-├── Implementation_Plan_NYC_Airbnb_Price_Prediction.md   ← the original spec
 └── docs/superpowers/plans/2026-09-24-nyc-airbnb-price-prediction.md  ← build plan
 ```
 
@@ -316,7 +315,7 @@ flowchart LR
 
 ### Step 1 — Copy the Dataset In Under Its Canonical Name
 
-The Kaggle download on this machine is called `Airbnb NYC 2019.csv` (with spaces). We give it the standard name the spec uses:
+The Kaggle download on this machine is called `Airbnb NYC 2019.csv` (with spaces). We give it the dataset's standard Kaggle name:
 
 ```bash
 mkdir -p data
@@ -1147,7 +1146,7 @@ sequenceDiagram
 
 ### The Big Design Choice: Load the Model From the Registry, Not a File
 
-The obvious approach is `joblib.load("models/model.pkl")`. The spec explicitly rejects this (the Article 12 lesson): a hardcoded path ties the API to one specific file. Every new model would need someone to copy a file and redeploy.
+The obvious approach is `joblib.load("models/model.pkl")`. We deliberately avoid this (the Article 12 lesson): a hardcoded path ties the API to one specific file. Every new model would need someone to copy a file and redeploy.
 
 Instead, `main.py` asks the **MLflow Model Registry** (built in Tasks 7–8) for *whichever model currently holds the `champion` label*:
 
@@ -1509,7 +1508,7 @@ def require_tracking_uri() -> str:
 
 ### Step 4 — `track_experiments.py`: Five Runs, One Loop
 
-The five configurations from the spec, as data:
+The five planned configurations, as data:
 
 ```python
 CONFIGS = {
@@ -1579,7 +1578,7 @@ Tests (training on the 2,000-row sample, so they're fast):
 
 | Test | What it proves |
 |---|---|
-| `test_configs_match_the_spec` | Exactly the 5 run names from the spec, in order |
+| `test_configs_are_the_five_planned_runs` | Exactly the 5 planned run names, in order |
 | `test_train_and_log_records_params_metrics_and_model` | A run gets the right name, params, metrics — and its model loads back and predicts positive prices |
 | `test_every_config_can_be_logged_and_loaded_back` (×5) | **Every** config — not just LinearRegression — survives a save → load round trip |
 
@@ -1743,7 +1742,7 @@ flowchart LR
 
 ### Step 1 — The Decision: Which Model Wins?
 
-The spec says: pick the lowest RMSE, but sanity-check it. The sanity check found a real problem:
+The plan was: pick the lowest RMSE, but sanity-check it. The sanity check found a real problem:
 
 | Run | RMSE | Model size |
 |---|---|---|
@@ -1866,7 +1865,7 @@ Unit tests (throwaway `local_mlflow` database — never your real server):
 | `test_promoting_again_moves_the_alias` | A second promotion creates v2 and moves the alias |
 | `test_register_uses_the_runs_logged_model_not_a_fallback` | No fallback warning; the version's source is `models:/m-…` |
 
-**Real-registry tests** — `tests/test_model_registry.py` (spec Phase 9). These load the actual champion from your server through `models:/AirbnbPriceModel@champion` (not joblib) and check that predictions make economic sense:
+**Real-registry tests** — `tests/test_model_registry.py`. These load the actual champion from your server through `models:/AirbnbPriceModel@champion` (not joblib) and check that predictions make economic sense:
 
 | Test | What it proves |
 |---|---|
@@ -1887,7 +1886,7 @@ env -u MLFLOW_TRACKING_URI pytest tests/test_model_registry.py -v -rs           
 
 ### Step 6 — Definition of Done: Load From a Separate Process, Then Serve
 
-The spec's Phase 7 test: a **brand-new Python process** — knowing nothing except the registry address — loads and predicts:
+The key registry test: a **brand-new Python process** — knowing nothing except the registry address — loads and predicts:
 
 ```bash
 export MLFLOW_TRACKING_URI=http://127.0.0.1:5001
@@ -1985,7 +1984,7 @@ flowchart LR
 
 ### The Big Decision: Don't Put the Model in the Image
 
-The spec asks us to decide: train during the build, copy a model file in, or neither? **Neither.** The image contains only code and libraries; the container downloads `@champion` from MLflow when it starts.
+There are three options: train during the build, copy a model file in, or neither. **Neither.** The image contains only code and libraries; the container downloads `@champion` from MLflow when it starts.
 
 | Approach | New model means... | Our choice |
 |---|---|---|
@@ -2409,7 +2408,7 @@ Dashboard: **http://127.0.0.1:4200**. It keeps its history in `~/.prefect/prefec
 
 ### Step 4 — Run the Flow by Hand First
 
-The spec says to schedule only after a manual run works:
+Rule: schedule only after a manual run works:
 
 ```bash
 export MLFLOW_TRACKING_URI=http://127.0.0.1:5001
@@ -2514,7 +2513,7 @@ After four full training rounds, `mlartifacts/` is **1.4 GB**. Each round saves 
 
 Possible fixes, not applied yet:
 - Delete old, non-champion runs periodically, then run `mlflow gc` to free their files.
-- Drop `rf_100` from the scheduled flow (a deviation from the spec's five configs).
+- Drop `rf_100` from the scheduled flow (changing the five planned configs).
 - Cap its depth.
 
 ---
@@ -3074,7 +3073,7 @@ NYC-Airbnb-Price-Prediction/
 
 # TASK 13 — Docker Compose: MLflow + API Together
 
-*(Optional in the spec. First skipped, then added at the end, after Task 14.)*
+*(Optional. First skipped, then added at the end, after Task 14.)*
 
 ---
 
@@ -3273,20 +3272,20 @@ NYC-Airbnb-Price-Prediction/
 
 ### What Problem This Solves
 
-"It worked when we built it" isn't the same as "it works now". Later changes (the skops fix, the size budget, the loud-failure fix, the multi-arch build) could have broken something earlier. So at the end we **re-verified every definition-of-done item from the spec (§5) against the current state**, not from memory, and rebuilt the project from GitHub alone.
+"It worked when we built it" isn't the same as "it works now". Later changes (the skops fix, the size budget, the loud-failure fix, the multi-arch build) could have broken something earlier. So at the end we **re-verified every definition-of-done item against the current state**, not from memory, and rebuilt the project from GitHub alone.
 
 ---
 
 ### Step 1 — Re-Verify Every Definition-of-Done Item
 
-| Spec item | How we checked it (today, final state) | Result |
+| Requirement | How we checked it (today, final state) | Result |
 |---|---|---|
-| **Phase 3** — baseline metrics printed and sane | `python train.py` | RMSE **83.545**, MAE 47.077, R² 0.395 — tens of dollars ✅ |
-| **Phase 6** — all 5 runs in MLflow with params and metrics | Queried every config's latest `FINISHED` run | All 5 present with params, `rmse`/`mae`/`r2`/`model_size_mb` (25 finished runs in total across retrains) ✅ |
-| **Phase 7** — separate process loads `@champion` | New Python process → `load_model("models:/AirbnbPriceModel@champion")` | `@champion` = v5 → `TransformedTargetRegressor`, **$244.25** ✅ |
-| **Phase 9** — all tests pass | `MLFLOW_TRACKING_URI=... pytest` | **46 passed** ✅ |
-| **Phase 9** — breaking a constraint really fails | Loosened `availability_365` to `le=400` (a *different* rule from Task 5) | `FAILED test_invalid_value_is_rejected[availability_365-366]` — `DID NOT RAISE`; restored, 14 passed ✅ |
-| **Phase 10** — a real PR shows CI running | GitHub check-runs for every merged PR | PR #1–#4: `test=success`, `build-image=success` ✅ |
+| **Task 4** — baseline metrics printed and sane | `python train.py` | RMSE **83.545**, MAE 47.077, R² 0.395 — tens of dollars ✅ |
+| **Task 7** — all 5 runs in MLflow with params and metrics | Queried every config's latest `FINISHED` run | All 5 present with params, `rmse`/`mae`/`r2`/`model_size_mb` (25 finished runs in total across retrains) ✅ |
+| **Task 8** — separate process loads `@champion` | New Python process → `load_model("models:/AirbnbPriceModel@champion")` | `@champion` = v5 → `TransformedTargetRegressor`, **$244.25** ✅ |
+| **Tests** — all tests pass | `MLFLOW_TRACKING_URI=... pytest` | **46 passed** ✅ |
+| **Tests** — breaking a constraint really fails | Loosened `availability_365` to `le=400` (a *different* rule from Task 5) | `FAILED test_invalid_value_is_rejected[availability_365-366]` — `DID NOT RAISE`; restored, 14 passed ✅ |
+| **Task 11** — a real PR shows CI running | GitHub check-runs for every merged PR | PR #1–#4: `test=success`, `build-image=success` ✅ |
 
 ---
 

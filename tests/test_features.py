@@ -8,7 +8,7 @@ import features
 
 @pytest.fixture
 def raw_df():
-    """Six raw listings with all 16 CSV columns and the real quirks from spec §2."""
+    """Six raw listings with all 16 CSV columns and the dataset's real quirks (implementation.md, Task 2)."""
     base = dict(
         id=1, name="x", host_id=1, host_name="h",
         neighbourhood_group="Manhattan", neighbourhood="Midtown",

@@ -1,4 +1,4 @@
-"""Phase 8: Prefect flow — load -> split -> train_and_log x5 -> promote best -> request deploy.
+"""Prefect flow (implementation.md, Task 10) — load -> split -> train_and_log x5 -> promote best -> request deploy.
 
 MLFLOW_TRACKING_URI is read from the environment. Run once:
     python orchestrate_training.py

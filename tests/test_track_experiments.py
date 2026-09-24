@@ -6,7 +6,7 @@ from registry import CHAMPION_ALIAS, MAX_MODEL_SIZE_MB, MODEL_NAME, pick_best, r
 from track_experiments import CONFIGS, train_and_log
 
 
-def test_configs_match_the_spec():
+def test_configs_are_the_five_planned_runs():
     assert list(CONFIGS) == [
         "linreg_baseline", "rf_100", "rf_300_depth10", "gb_100_lr01", "gb_200_lr005",
     ]

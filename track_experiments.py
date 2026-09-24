@@ -1,4 +1,4 @@
-"""Phase 6: train the five candidate configs and log each as an MLflow run.
+"""Experiment tracking (implementation.md, Task 7): train the five candidate configs and log each as an MLflow run.
 
 Metrics are on the dollar scale (features.evaluate), and every logged model
 carries its own log1p/expm1 target transform.

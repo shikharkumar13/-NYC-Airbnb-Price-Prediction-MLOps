@@ -8,7 +8,7 @@
 
 **Tech Stack:** Python 3.11 (uv-managed venv, matches `python:3.11-slim` image), pandas, scikit-learn, MLflow 3.x (server + registry with aliases), FastAPI + Pydantic v2, Prefect 3, DVC, pytest, Docker / Docker Compose, GitHub Actions, Docker Hub.
 
-**Source spec:** `Implementation_Plan_NYC_Airbnb_Price_Prediction.md` (repo root). Section/phase numbers below refer to it.
+**Source:** the original project brief (no longer kept in the repo). "Spec", section (§) and phase numbers below refer to that brief; `implementation.md` documents what was actually built, task by task.
 
 > **Status (2026-09-24):** All 14 tasks are implemented (Task 13, Compose, was added last; it reuses the local MLflow data on host port 5001). Where the code in the repo differs from the snippets below, **the repo is the source of truth**. The differences are:
 > - `httpx2` instead of `httpx`
@@ -165,7 +165,7 @@ testpaths = tests
 # NYC Airbnb Price Prediction — MLOps practice project
 
 Predicts a NYC Airbnb listing's nightly price (USD). See
-`Implementation_Plan_NYC_Airbnb_Price_Prediction.md` for the spec and
+`implementation.md` for the full walkthrough and
 `docs/superpowers/plans/` for the build plan.
 
 ## Setup
@@ -177,7 +177,7 @@ Predicts a NYC Airbnb listing's nightly price (USD). See
 - [ ] **Step 8: Commit**
 
 ```bash
-git add .gitignore requirements.txt pytest.ini README.md Implementation_Plan_NYC_Airbnb_Price_Prediction.md docs/
+git add .gitignore requirements.txt pytest.ini README.md docs/
 git commit -m "chore: project scaffold, pinned requirements, pytest config"
 ```
 

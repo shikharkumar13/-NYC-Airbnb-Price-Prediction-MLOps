@@ -3,7 +3,6 @@
 Predicts a New York City Airbnb listing's nightly price (USD) from its location, room type and booking activity. The model is deliberately modest. The point of the project is the **deployment flow around it**: versioned data, tracked experiments, a model registry, a containerised API, scheduled retraining, CI, and continuous deployment triggered by a new model.
 
 **Full step-by-step walkthrough:** [`implementation.md`](implementation.md) covers every command, real output, bug and decision.
-**Original spec:** [`Implementation_Plan_NYC_Airbnb_Price_Prediction.md`](Implementation_Plan_NYC_Airbnb_Price_Prediction.md)
 
 ```mermaid
 flowchart LR
