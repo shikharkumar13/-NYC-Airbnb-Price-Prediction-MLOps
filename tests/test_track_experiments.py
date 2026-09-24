@@ -22,3 +22,12 @@ def test_train_and_log_records_params_metrics_and_model(local_mlflow, sample_spl
 
     model = mlflow.sklearn.load_model(f"runs:/{run_id}/model")
     assert (model.predict(sample_splits[1]) > 0).all()
+
+
+@pytest.mark.parametrize("run_name", list(CONFIGS))
+def test_every_config_can_be_logged_and_loaded_back(local_mlflow, sample_splits, run_name):
+    # MLflow 3 saves sklearn models with skops, which refuses unfamiliar types
+    # (e.g. the Tree objects inside RandomForest/GradientBoosting) unless trusted.
+    run_id, _ = train_and_log(run_name, *sample_splits)
+    model = mlflow.sklearn.load_model(f"runs:/{run_id}/model")
+    assert (model.predict(sample_splits[1]) > 0).all()
