@@ -143,8 +143,14 @@ The same $244.25 as Chapter 8 — same model, same library versions.
 Hygiene checks:
 ```bash
 docker exec airbnb-api whoami       # appuser   (not root)
-docker exec airbnb-api ls /app      # main.py requirements-serve.txt schemas.py   (no data, no models)
+docker exec airbnb-api ls /app      # three files (below): no data, no models
 docker rm -f airbnb-api             # stop and remove the test container
+```
+```
+appuser
+main.py
+requirements-serve.txt
+schemas.py
 ```
 
 ### 🧪 See It Fail — a slim image missing a library
@@ -372,6 +378,6 @@ git commit -m "feat: Prefect training flow with retries, promotion and deploy tr
 pytest -q                                     # 46 passed
 env -u MLFLOW_TRACKING_URI pytest -q          # 43 passed, 3 skipped
 ```
-Prefect UI: one completed run, one failed run (the retry demo), and a paused `weekly-retrain` deployment. MLflow: `@champion` → v3.
+Prefect UI: two completed runs (Step 5 by hand, Step 6 through the deployment), one failed run (the retry demo), and a paused `weekly-retrain` deployment. MLflow: `@champion` → v3.
 
 **The mental shift:** training is no longer something you *do* — it's something that *happens*, with retries and a history you can inspect.

@@ -57,6 +57,7 @@ It reuses the same `train_and_log` and `register_and_promote` as the real pipeli
 | `on: pull_request` | Run when a PR is opened or gets new commits. A plain push to `main` runs nothing |
 | `runs-on: ubuntu-latest` | A fresh Linux machine, thrown away afterwards |
 | `env:` | Environment variables for every step. Port **5000** is fine on GitHub's machines (no AirPlay) |
+| `MLFLOW_DISABLE_AGENT_HINT: "1"` | Silences an informational MLflow log line (a hint aimed at AI coding tools) so the CI log stays readable. Harmless either way |
 | `actions/checkout` | Downloads your repository into the machine |
 | `setup-python` + `cache: pip` | Installs Python 3.11 and caches downloaded packages between runs |
 | `mlflow server … &` | `&` runs the server in the background so the job can continue |

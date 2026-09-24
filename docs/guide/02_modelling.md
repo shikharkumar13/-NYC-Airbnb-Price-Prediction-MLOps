@@ -79,6 +79,11 @@ flowchart LR
 
 ### Step 1 — Write the tests first
 
+Create the two folders this chapter's files go in:
+```bash
+mkdir -p tests scripts
+```
+
 <<<FILE:tests/test_features.py>>>
 
 **Walk through it:**
@@ -87,7 +92,7 @@ flowchart LR
 2. **Cleaning tests** — only `[50, 150, 300, 800]` survive; the missing review rate becomes `0`; `id`/`name`/… are gone.
 3. **`test_log_target_inversion_matches_hand_computed_value`** — the most important test. A `DummyRegressor(strategy="mean")` simply predicts the average of what it was trained on. Trained on log prices, it predicts `mean(log1p(prices))` — so the dollar prediction *must* be `expm1(mean(log1p(prices)))` ≈ $206. If the conversion back were missing, it would return ≈ 5.3.
 4. **`test_evaluate_returns_dollar_scale_metrics`** — RMSE must be in dollars (> 100 here), not log units.
-5. **`test_split_data_is_reproducible_80_20`** — 80/20 ratio, same split every run. It uses fixtures from `conftest.py` (Step 5).
+5. **`test_split_data_is_reproducible_80_20`** — 80/20 ratio, same split every run. It uses fixtures from `conftest.py` (Step 4).
 6. **`test_model_tolerates_unseen_neighbourhood`** — a neighbourhood called `"Nowhere Heights"` gets a price, not a crash.
 
 Run them — before `features.py` exists:
